@@ -23,6 +23,7 @@
 #include "../../ext/sdot/src/sdot/PowerDiagram/get_boundary_integral.h"
 #include "../../ext/sdot/src/sdot/PowerDiagram/get_image_integrals.h"
 #include "../../ext/sdot/src/sdot/PowerDiagram/get_integrals.h"
+#include "../../ext/sdot/src/sdot/PowerDiagram/get_internal_energy.h"
 #include "../../ext/sdot/src/sdot/PowerDiagram/get_centroids.h"
 
 #include "../../ext/sdot/src/sdot/Display/VtkOutput.h"
@@ -121,6 +122,29 @@ namespace {
         find_radial_func( func, [&]( const auto &ft ) {
             sdot::get_integrals( ptr_res, grid, domain, ptr_positions, ptr_weights, positions.shape( 0 ), ft );
         } );
+
+        return res;
+    }
+
+    template<class Domain,class Grid,class FUNC>
+    pybind11::array_t<TF> get_internal_energy( pybind11::array_t<TF> &positions, pybind11::array_t<TF> &weights, Domain &domain, Grid &grid, const FUNC &func ) {
+        auto ptr_positions = reinterpret_cast<const typename Grid::Pt *>( positions.data() );
+        auto ptr_weights = reinterpret_cast<const typename Grid::TF *>( weights.data() );
+
+        pybind11::array_t<TF> res;
+        res.resize( { positions.shape( 0 ) } );
+        auto buf_res = res.request();
+        auto ptr_res = (TF *)buf_res.ptr;
+        
+        try {
+            find_radial_func( func, [&]( const auto &ft ) {
+                sdot::get_internal_energy( ptr_res, grid, domain, ptr_positions, ptr_weights, positions.shape( 0 ), ft );
+            } );
+        } catch ( const std::exception &e ) {
+            std::fill(ptr_res, ptr_res + positions.shape( 0 ), TF(0));
+        } catch (...) {
+            std::fill(ptr_res, ptr_res + positions.shape( 0 ), TF(0));
+        }
 
         return res;
     }
@@ -826,6 +850,9 @@ namespace {
             pybind11::array_t<PD_TYPE> integrals_##NAME( pybind11::array_t<PD_TYPE> &positions, pybind11::array_t<PD_TYPE> &weights, DOMAIN<dim,TF> &domain, FUNC &func ) { \
                 return get_integrals( positions, weights, domain.bounds, grid, func ); \
             } \
+            pybind11::array_t<PD_TYPE> internal_energy_##NAME( pybind11::array_t<PD_TYPE> &positions, pybind11::array_t<PD_TYPE> &weights, DOMAIN<dim,TF> &domain, FUNC &func ) { \
+                return get_integrals( positions, weights, domain.bounds, grid, func ); \
+            } \
             pybind11::array_t<PD_TYPE> image_integrals_##NAME( pybind11::array_t<PD_TYPE> &positions, pybind11::array_t<PD_TYPE> &weights, DOMAIN<dim,TF> &domain, const FUNC &func, pybind11::array_t<TF> &beg, pybind11::array_t<TF> &end, pybind11::array_t<std::size_t> &nb_pixels ) { \
                 return get_image_integrals( positions, weights, domain.bounds, grid, func, beg, end, nb_pixels ); \
             } \
@@ -904,6 +931,7 @@ PYBIND11_MODULE( PD_MODULE_NAME, m ) {
         .def( "add_replication"                                             , &PowerDiagramZGrid::add_replication                                            , "" )
         #define DEF_FOR( NAME, DOMAIN, FUNC ) \
                 .def( "integrals"                                           , &PowerDiagramZGrid::integrals_##NAME                                           , "" ) \
+                .def( "internal_energy"                                     , &PowerDiagramZGrid::internal_energy_##NAME                                     , "" ) \
                 .def( "image_integrals"                                     , &PowerDiagramZGrid::image_integrals_##NAME                                     , "" ) \
                 .def( "der_integrals_wrt_weights"                           , &PowerDiagramZGrid::der_integrals_wrt_weights_##NAME                           , "" ) \
                 .def( "distances_from_boundaries"                           , &PowerDiagramZGrid::distances_from_boundaries_##NAME                           , "" ) \

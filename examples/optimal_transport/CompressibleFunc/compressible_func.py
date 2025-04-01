@@ -96,4 +96,4 @@ psi0 = weight_transform(w0, Z)
 
 ot = OptimalTransport( positions = Y, weights = psi0, domain = domain, radial_func = CompressibleFunc( kappa = 1, gamma = 1.41, g = 1, f_cor = 1, pi_0 = 1, c_p = 1 ))
 print( ot.pd.integrals() )
-print( ot.pd.centroids() )
+print( ot.pd.internal_energy() )

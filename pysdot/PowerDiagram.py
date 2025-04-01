@@ -61,6 +61,15 @@ class PowerDiagram:
             self.domain._inst,
             self.radial_func.name()
         )
+    
+    def internal_energy(self):
+        inst = self._updated_grid()
+        return inst.internal_energy(
+            np.ascontiguousarray( self.positions ),
+            np.ascontiguousarray( self.weights ),
+            self.domain._inst,
+            self.radial_func.name()
+        )
 
     def image_integrals(self, min_pos, max_pos, dimensions):
         inst = self._updated_grid()
