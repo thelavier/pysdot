@@ -851,7 +851,7 @@ namespace {
                 return get_integrals( positions, weights, domain.bounds, grid, func ); \
             } \
             pybind11::array_t<PD_TYPE> internal_energy_##NAME( pybind11::array_t<PD_TYPE> &positions, pybind11::array_t<PD_TYPE> &weights, DOMAIN<dim,TF> &domain, FUNC &func ) { \
-                return get_integrals( positions, weights, domain.bounds, grid, func ); \
+                return get_internal_energy( positions, weights, domain.bounds, grid, func ); \
             } \
             pybind11::array_t<PD_TYPE> image_integrals_##NAME( pybind11::array_t<PD_TYPE> &positions, pybind11::array_t<PD_TYPE> &weights, DOMAIN<dim,TF> &domain, const FUNC &func, pybind11::array_t<TF> &beg, pybind11::array_t<TF> &end, pybind11::array_t<std::size_t> &nb_pixels ) { \
                 return get_image_integrals( positions, weights, domain.bounds, grid, func, beg, end, nb_pixels ); \
