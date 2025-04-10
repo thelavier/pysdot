@@ -6,7 +6,10 @@ sys.path.append( "." )
 from pysdot.domain_types import ConvexPolyhedraAssembly
 from pysdot.radial_funcs import CompressibleFunc
 from scipy.spatial import Delaunay
+from scipy.sparse import csr_matrix
+import pyvista as pv
 from pysdot import OptimalTransport
+from pysdot import PowerDiagram
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -62,7 +65,7 @@ def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
     term1 = (z1 / (2 * z2))**2
     term2 = (1 / (2 * z2))**2
     term3 = (f**2 / (2 * z2)) * (z1**2)
-    
+
     w = psi - term1 - term2 + term3 - c_p * Pi_0
     return w
 
@@ -112,7 +115,7 @@ def expmap_inverse_vec(points, y, f, g):
 
 # domain
 domain = ConvexPolyhedraAssembly()
-domain.add_box( [-1, 0], [2, 1] )
+domain.add_box( [0, -1], [2, 1] )
 # numTri = np.shape(tri.simplices)[0] # number of triangles in the triangulation
 
 # Add each triangle to the domain one by one
@@ -122,7 +125,7 @@ domain.add_box( [-1, 0], [2, 1] )
 #     p = distorted_points[T,:] # coordinates of vertices in the triangle
 #     domain.add_simplex(p) # add the triangle to the domain
 
-Z = np.array([[1, 1], [1, 1.5], [0.5, 0.5], [1.5, 0.5]])
+Z = np.array([[1, 1], [1, 1.5]]);#, [0.5, 0.5], [1.5, 0.5]])
 N = len(Z)
 w0 = np.zeros(N) + 1
 
@@ -133,7 +136,11 @@ err_tol = (1e-3 / 100) * (1 / N)
 
 ot = OptimalTransport( positions = Y, weights = psi0, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = 1, gamma = 1.41, g = 1, f_cor = 1, pi_0 = 1, c_p = 1 ))
 ot.set_stopping_criterion(err_tol, 'max delta masses')
+
 print( "Pre-masses: ", ot.pd.integrals() )
+mvs = ot.pd.der_integrals_wrt_weights()
+m = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets))
+print( m.todense() )
 
 ot.adjust_weights()
 psi = ot.get_weights()
