@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 from itertools import combinations
 from collections import defaultdict
 
+## Various supporting functions to ensure that we transform to the c-exponential chart where the cost is quadratic
+
 def seed_transform(Z):
     """
     Given Z, an (N,2) array where each row is [z1, z2],
@@ -134,7 +136,56 @@ def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, epsil
                 hessian_fd[j, i] = hessian_fd[i, j]
     return hessian_fd
 
-# System Parameters
+#Define the rescaling function to improve the inital guess for the Damped Newton Solver
+def rescale_weights(bx, Z, PeriodicX, PeriodicY):
+    """
+    Rescales weights for 3D Laguerre tessellation, ensuring positive cell areas.
+
+    Parameters:
+        bx (list/tuple): Domain [xmin, ymin, zmin, xmax, ymax, zmax].
+        Z (numpy.ndarray): Seed points (shape: n x 3).
+        psi (float): Initial guess for weights.
+        PeriodicX, PeriodicY (bool): Periodicity flags for each axis.
+
+    Returns:
+        tuple: Weights (numpy.ndarray), scaling factor (float), and translation vector (numpy.ndarray).
+    """
+    if PeriodicX and PeriodicY:
+        return psi, 0, 0
+
+    min_Z, max_Z = np.min(Z, axis=0), np.max(Z, axis=0)
+    lambda_vals = []
+
+    # Calculate lambda_ for each non-periodic dimension
+    for i, periodic in enumerate([PeriodicX, PeriodicY]):
+        if not periodic:
+            min_b = bx[i]
+            max_b = bx[i + 2]
+            lambda_dim = (max_b - min_b) / (max_Z[i] - min_Z[i])
+            lambda_vals.append(lambda_dim)
+
+    # Choose the minimum lambda_ and apply a small reduction
+    lambda_ = min(lambda_vals) * (1 - 1e-2) if lambda_vals else np.inf
+
+    # Calculate translation vector for non-periodic dimensions
+    translation = []
+    for i, periodic in enumerate([PeriodicX, PeriodicY]):
+        if not periodic:
+            center_dom = (bx[i + 2] + bx[i]) / 2
+            center_rescaled = lambda_ * (min_Z[i] + max_Z[i]) / 2
+            translation.append(center_dom - center_rescaled)
+        else:
+            translation.append(0)
+    t = np.array(translation)[~np.array([PeriodicX, PeriodicY])]
+
+    # Calculate weights
+    Z_mod = Z[:, ~np.array([PeriodicX, PeriodicY])]
+    w = (1 - lambda_) * np.square(np.linalg.norm(Z_mod, axis=1)) - 2 * np.dot(Z_mod, t)
+
+    return w
+
+## Set the System Parameters
+
 f = 1 
 g = 10
 c_p = 1003.5
@@ -145,7 +196,22 @@ box = [-1, 0, 1, 1]
 PeriodicX = True
 PeriodicY = False
 
-# First we create a triangulation of a square
+## Construct the Domain
+
+domain = ConvexPolyhedraAssembly()
+
+# If working on a box do the following 
+
+Lx, Ly = [box[i+2] - box[i] for i in range(2)]
+
+# Calculate the offset and size for each dimension based on periodicity
+size = [2 * Lx if PeriodicX else box[2], 2 * Ly if PeriodicY else box[3]]
+offset = [-Lx if PeriodicX else box[0], -Ly if PeriodicY else box[1]]
+
+domain.add_box(offset, size)
+
+# If working on a distorted domain do the following
+
 # Nx = 50
 # Ny = 50
 # Lx = 2 # width of the fundamental domain
@@ -156,6 +222,13 @@ PeriodicY = False
 # points = np.array([X.flatten(), Y.flatten()]).T
 # tri = Delaunay(points)
 # distorted_points = expmap_inverse_vec(points, np.array([0, 1]), f, g)
+
+# numTri = np.shape(tri.simplices)[0] # number of triangles in the triangulation
+
+# # Add each triangle to the domain one by one
+# for T in tri.simplices:
+#     p = distorted_points[T,:] # coordinates of vertices in the triangle
+#     domain.add_simplex(p) # add the triangle to the domain
 
 # --- Plotting the triangulation ---
 
@@ -170,24 +243,10 @@ PeriodicY = False
 # plt.axis('equal')
 # plt.show()
 
-# domain
-domain = ConvexPolyhedraAssembly()
-# numTri = np.shape(tri.simplices)[0] # number of triangles in the triangulation
+## Set the seed positions
 
-# # Add each triangle to the domain one by one
-# for T in tri.simplices:
-#     p = distorted_points[T,:] # coordinates of vertices in the triangle
-#     domain.add_simplex(p) # add the triangle to the domain
-
-Lx, Ly = [box[i+2] - box[i] for i in range(2)]
-
-# Calculate the offset and size for each dimension based on periodicity
-size = [2 * Lx if PeriodicX else box[2], 2 * Ly if PeriodicY else box[3]]
-offset = [-Lx if PeriodicX else box[0], -Ly if PeriodicY else box[1]]
-
-domain.add_box(offset, size)
-
-N = 1000
+# Set the number of seeds
+N = 100
 
 # Generate x values between -1 and 1
 x = np.random.uniform(-1, 1, N)
@@ -196,23 +255,34 @@ x = np.random.uniform(-1, 1, N)
 y = np.random.uniform(98900, 102000, N)
 
 # Combine x and y into a single array of shape (N, 2)
-# Z = np.array([[1,1], [1.5, 0.5], [0.5, 0.5], [1, 1.5]])
 Z = np.column_stack((x, y))
 N = len(Z)
 
-w0 = np.zeros(N) + 100
-Y = seed_transform(Z)
-psi0 = weight_transform(w0, Z, f = f, c_p = c_p, Pi_0 = Pi_0)
+## Transform the seeds (diracs) to the exponential chart
 
-err_tol = (1e-3 / 100) * (1 / N)
+Y = seed_transform(Z)
+
+## Set an inital guess for the weights
+
+psi0 = rescale_weights(box, Y, PeriodicX, PeriodicY) + 100
+# psi0 = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
+
+## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
 
 ot = OptimalTransport( positions = Y, weights = psi0, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 50 ), verbosity=0)
+
+## Set the error tolerance and the stopping criterion 
+
+err_tol = (1e-3 / 100) * (1 / N)
 ot.set_stopping_criterion(err_tol, 'max delta masses')
 
-# Adding replications based on periodicity
+## Adding replications based on periodicity
+
 for x in range(-int(PeriodicX), int(PeriodicX) + 1):
     if x != 0 :
         ot.pd.add_replication([2 * x, 0])
+
+## Check that the optimal transport problem is set up correctly, all cells should initially have positive mass
 
 print( "Pre-masses: ", ot.pd.integrals() )
 # mvs = ot.pd.der_integrals_wrt_weights()
@@ -221,14 +291,20 @@ print( "Pre-masses: ", ot.pd.integrals() )
 # print( "Finite Differences Hessian : \n", Hess)
 # print( "Numerical Hessian : \n", -m.todense() )
 
+## Solve the optimal transport problem
+
 ot.adjust_weights()
 psi = ot.get_weights()
-w = weight_transform_inv(psi, Z)
+# w = weight_transform_inv(psi, Z)
+
+## Check that the masses after solving the problem are all equal
 
 print( "Post-masses: ", ot.pd.integrals() )
 # print( "Internal Energy: ", ot.pd.internal_energy() )
 # print( "Centroids:", ot.pd.centroids() )
 # print( "Optimized weights: ", w )
+
+## Visualise the solution to the Optimal transport probelm
 
 filename = 'pb.vtk'
 ot.pd.display_vtk( filename )
