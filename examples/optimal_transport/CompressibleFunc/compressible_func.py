@@ -141,18 +141,21 @@ c_p = 1003.5
 Pi_0 = 0.864
 gamma = 1.41
 kappa = 65.00526358589575
+box = [-1, 0, 1, 1]
+PeriodicX = True
+PeriodicY = False
 
 # First we create a triangulation of a square
-Nx = 50
-Ny = 50
-Lx = 2 # width of the fundamental domain
-Ly = 1
-x = np.linspace(-1, 1, Nx)
-y = np.linspace(0, 1, Ny)
-X, Y = np.meshgrid(x, y)
-points = np.array([X.flatten(), Y.flatten()]).T
-tri = Delaunay(points)
-distorted_points = expmap_inverse_vec(points, np.array([0, 1]), f, g)
+# Nx = 50
+# Ny = 50
+# Lx = 2 # width of the fundamental domain
+# Ly = 1
+# x = np.linspace(-1, 1, Nx)
+# y = np.linspace(0, 1, Ny)
+# X, Y = np.meshgrid(x, y)
+# points = np.array([X.flatten(), Y.flatten()]).T
+# tri = Delaunay(points)
+# distorted_points = expmap_inverse_vec(points, np.array([0, 1]), f, g)
 
 # --- Plotting the triangulation ---
 
@@ -169,15 +172,22 @@ distorted_points = expmap_inverse_vec(points, np.array([0, 1]), f, g)
 
 # domain
 domain = ConvexPolyhedraAssembly()
-# domain.add_box( [-1, 0], [1, 1] )
-numTri = np.shape(tri.simplices)[0] # number of triangles in the triangulation
+# numTri = np.shape(tri.simplices)[0] # number of triangles in the triangulation
 
-# Add each triangle to the domain one by one
-for T in tri.simplices:
-    p = distorted_points[T,:] # coordinates of vertices in the triangle
-    domain.add_simplex(p) # add the triangle to the domain
+# # Add each triangle to the domain one by one
+# for T in tri.simplices:
+#     p = distorted_points[T,:] # coordinates of vertices in the triangle
+#     domain.add_simplex(p) # add the triangle to the domain
 
-N = 10
+Lx, Ly = [box[i+2] - box[i] for i in range(2)]
+
+# Calculate the offset and size for each dimension based on periodicity
+size = [2 * Lx if PeriodicX else box[2], 2 * Ly if PeriodicY else box[3]]
+offset = [-Lx if PeriodicX else box[0], -Ly if PeriodicY else box[1]]
+
+domain.add_box(offset, size)
+
+N = 1000
 
 # Generate x values between -1 and 1
 x = np.random.uniform(-1, 1, N)
@@ -188,10 +198,9 @@ y = np.random.uniform(98900, 102000, N)
 # Combine x and y into a single array of shape (N, 2)
 # Z = np.array([[1,1], [1.5, 0.5], [0.5, 0.5], [1, 1.5]])
 Z = np.column_stack((x, y))
-print("Z : ",  Z)
 N = len(Z)
 
-w0 = np.zeros(N)
+w0 = np.zeros(N) + 100
 Y = seed_transform(Z)
 psi0 = weight_transform(w0, Z, f = f, c_p = c_p, Pi_0 = Pi_0)
 
@@ -201,7 +210,7 @@ ot = OptimalTransport( positions = Y, weights = psi0, masses = np.ones(N) / N, d
 ot.set_stopping_criterion(err_tol, 'max delta masses')
 
 # Adding replications based on periodicity
-for x in range(-int(True), int(True) + 1):
+for x in range(-int(PeriodicX), int(PeriodicX) + 1):
     if x != 0 :
         ot.pd.add_replication([2 * x, 0])
 
@@ -302,7 +311,7 @@ grid.cell_data['colours']=cell_colours
 # plot the data with an automatically created plotter, for a static picture use backend='static'
 plotter = pv.Plotter(window_size=[800,800])
 plotter.add_mesh(grid) #, clim=[minvel, maxvel])
-plotter.set_scale(xscale = 1, yscale = .1)
+plotter.set_scale(xscale = 1, yscale = 1)
 
 # Set the camera for 2D view
 plotter.camera_position = 'xy'
