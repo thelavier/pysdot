@@ -6,6 +6,17 @@ from .PowerDiagram import PowerDiagram
 import numpy as np
 import importlib
 
+# This is a new helper function to set PETSc options
+def set_petsc_options(options_dict):
+    """
+    Sets PETSc options from a Python dictionary.
+    Example: {'ksp_type': 'cg', 'pc_type': 'jacobi'}
+    """
+    import sys
+    for key, value in options_dict.items():
+        sys.argv.append(f'-{key}')
+        if value is not None:
+            sys.argv.append(str(value))
 
 def dist(a, b):
     return np.linalg.norm(a - b, 2)
@@ -17,7 +28,8 @@ class BadInitialGuess(Exception):
 
 class OptimalTransport:
     def __init__(self, positions=None, weights=None, domain=None, masses=None, radial_func=RadialFuncUnit(),
-                 obj_max_dw=1e-8, obj_max_dm=0, linear_solver="Petsc", verbosity=0):
+                 obj_max_dw=1e-8, obj_max_dm=0, linear_solver="Petsc",
+                 petsc_options=None, verbosity=0):
         """
            stopping criterion = first obj_max_xy that is != 0
              * obj_max_dw => delta weights between two iterations
@@ -34,6 +46,11 @@ class OptimalTransport:
         self.max_iter = 1000
         self.delta_m = []
         self.delta_w = []
+
+        # --- MODIFICATION: Set PETSc options upon initialization ---
+        if self.linear_solver == "Petsc" and petsc_options is not None:
+            set_petsc_options(petsc_options)
+        # -----------------------------------------------------------
 
         self._linear_solver_inst = None
         self._masses_are_new = True
