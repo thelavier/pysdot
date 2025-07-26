@@ -413,3 +413,167 @@ class OptimalTransport:
                 break
                 
         return False
+
+    def adjust_weights_hybrid_periodic(self, Z_initial, f, c_p, Pi_0, Lx, relax=1.0, epsilon=1e-8):
+        """
+        A robust hybrid optimization method. This version uses a corrected
+        loop structure and state management to ensure both BFGS and Newton
+        phases are functional.
+        """
+        assert(self.obj_max_dw or self.obj_max_dm)
+
+        num_real = Z_initial.shape[0]
+        num_total = self.pd.positions.shape[0]
+        Jacobian = get_periodic_jacobian(num_real, (num_total // num_real - 1) // 2)
+
+        # --- CORRECTED INITIALIZATION BLOCK ---
+        mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+        if mvs.error:
+            if self.verbosity > 0: print("Info: Initial state has void cells. Starting BFGS with identity Hessian.")
+            B_k = np.eye(num_real)
+            g_k = np.ones(num_real)
+        else:
+            if self.verbosity > 0: print("Info: Initial state is valid. Starting BFGS with regularized Hessian.")
+            H_full_sparse = -csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
+            H_eff = H_full_sparse[:num_real, :num_real].toarray() + H_full_sparse[:num_real, num_real:].toarray() @ Jacobian
+            try:
+                B_k = np.linalg.inv(H_eff + epsilon * np.eye(num_real))
+            except np.linalg.LinAlgError:
+                B_k = np.eye(num_real)
+            g_k = mvs.v_values[:num_real] - self.masses[:num_real]
+        
+        old_weights = self.pd.weights.copy()
+        
+        for num_iter in range(self.max_iter):
+            # 1. GET DERIVATIVES AND USE RATIO RECOVERY IF A STEP FAILED
+            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+            if mvs.error:
+                if num_iter == 0: raise BadInitialGuess(self)
+                ratio = 0.5
+                self.pd.set_weights((1 - ratio) * old_weights + ratio * self.pd.weights)
+                if self.verbosity > 0: print(f"Info: Method -> {mode}. Iter {num_iter} -> void cells. Readjusting & retrying.")
+                continue
+
+            # 2. IF STEP WAS SUCCESSFUL, UPDATE CHECKPOINT AND DECIDE MODE
+            old_weights = self.pd.weights.copy()
+            current_masses = mvs.v_values
+            
+            if np.all(current_masses[:num_real] > 1e-12):
+                mode = 'Newton'
+            else:
+                mode = 'BFGS'
+                if num_iter == 0 and self.verbosity > 0:
+                    print("--- Initial state has zero-mass cells. Starting with BFGS. ---")
+            
+            # 3. PERFORM A STEP
+            if mode == 'Newton':
+                if num_iter > 0 and self.delta_m[-1] < 1e-9: break # Already converged
+                H_full_sparse = -csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
+                H_eff = H_full_sparse[:num_real, :num_real].toarray() + H_full_sparse[:num_real, num_real:].toarray() @ Jacobian
+                F_r = current_masses[:num_real] - self.masses[:num_real]
+                try: dw_r = np.linalg.solve(H_eff, -F_r)
+                except np.linalg.LinAlgError: return True
+                
+                updated_real_weights = old_weights[:num_real] - relax * dw_r
+                temp_full_weights = old_weights.copy()
+                temp_full_weights[:num_real] = updated_real_weights
+                self.pd.set_weights(recalculate_replica_weights(Z_initial, temp_full_weights, f, c_p, Pi_0, Lx))
+                dw_r_final = relax * dw_r
+
+            else: # mode == 'BFGS'
+                g_k = current_masses[:num_real] - self.masses[:num_real]
+                if np.linalg.norm(g_k) < 1e-9: break
+                
+                p_k = -B_k @ g_k
+                alpha = relax
+                # Backtracking Line Search
+                while True:
+                    dw_r = alpha * p_k
+                    temp_psi = old_weights.copy()
+                    temp_psi[:num_real] += dw_r
+                    self.pd.set_weights(recalculate_replica_weights(Z_initial, temp_psi, f, c_p, Pi_0, Lx))
+                    mvs_new = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+                    if not mvs_new.error: break
+                    alpha *= 0.5
+                    if alpha < 1e-8: return True
+
+                # Update BFGS approximation
+                s_k = alpha * p_k
+                g_k_plus_1 = mvs_new.v_values[:num_real] - self.masses[:num_real]
+                y_k = g_k_plus_1 - g_k
+                if abs(y_k.T @ s_k) > 1e-12:
+                    rho_k = 1.0 / (y_k.T @ s_k)
+                    I = np.eye(num_real)
+                    term1 = I - rho_k * np.outer(s_k, y_k)
+                    B_k = term1 @ B_k @ term1.T + rho_k * np.outer(s_k, s_k)
+                dw_r_final = s_k
+            
+            # 4. STOPPING CRITERIA
+            nm = np.max(np.abs(self.pd.integrals()[:num_real] - self.masses[:num_real]))
+            self.delta_m.append(nm)
+            if self.obj_max_dm and nm < self.obj_max_dm: break
+            nw = np.max(np.abs(dw_r_final))
+            self.delta_w.append(nw)
+            if self.obj_max_dw and nw < self.obj_max_dw: break
+        
+        return False
+    
+    def adjust_weights_bfgs_to_positive(self, Z_initial, f, c_p, Pi_0, Lx, relax=1.0):
+        """
+        A robust BFGS solver to find a state with all positive masses.
+
+        This version is correctly structured to handle a bad initial guess
+        by immediately using its line search to find a valid state.
+        """
+        num_real = Z_initial.shape[0]
+        
+        # 1. Initialize with placeholder values. The real gradient will be
+        #    found by the first successful line search.
+        B_k = np.eye(num_real)
+        g_k = np.ones(num_real) # A generic, non-zero initial search direction
+        
+        for num_iter in range(self.max_iter):
+            old_weights = self.pd.weights.copy()
+
+            # 2. The main action is to always perform a line search to find a
+            #    valid next state. This is what allows it to recover from a bad start.
+            p_k = -B_k @ g_k
+
+            alpha = relax
+            while True:
+                dw_r = alpha * p_k
+                temp_psi = old_weights.copy()
+                temp_psi[:num_real] += dw_r
+                self.pd.set_weights(recalculate_replica_weights(Z_initial, temp_psi, f, c_p, Pi_0, Lx))
+                mvs_new = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+                if not mvs_new.error:
+                    break # Success! We found a valid geometric state.
+                alpha *= 0.5
+                if alpha < 1e-9:
+                    if self.verbosity > 0: print("BFGS line search failed to find any valid step.")
+                    return True
+
+            # 3. We now have a valid state. Check if it meets the termination condition.
+            current_masses = mvs_new.v_values
+            if np.all(current_masses > 1e-12):
+                if self.verbosity > 0:
+                    print(f"\nSuccess on iter {num_iter}: All cells (real and virtual) have positive mass. Terminating BFGS.")
+                return False
+
+            # 4. If not terminated, update the BFGS state for the next search.
+            s_k = dw_r
+            g_k_plus_1 = current_masses[:num_real] - self.masses[:num_real]
+            y_k = g_k_plus_1 - g_k
+            
+            if abs(y_k.T @ s_k) > 1e-12:
+                rho_k = 1.0 / (y_k.T @ s_k)
+                I = np.eye(num_real)
+                term1 = I - rho_k * np.outer(s_k, y_k)
+                B_k = term1 @ B_k @ term1.T + rho_k * np.outer(s_k, s_k)
+            
+            # Update the gradient for the next iteration's search
+            g_k = g_k_plus_1
+
+        if self.verbosity > 0:
+            print(f"BFGS failed to achieve positive masses within {self.max_iter} iterations.")
+        return True

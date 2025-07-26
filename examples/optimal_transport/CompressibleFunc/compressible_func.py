@@ -287,11 +287,11 @@ def rescale_weights(box, Z, PeriodicX):
 
 f = 1 
 g = 1 #10
-c_p = 1 #1003.5
-Pi_0 = 1 #0.864
+c_p = 1003.5
+Pi_0 = 0.864
 gamma = 2
-kappa = 1/2 #65.00526358589575
-box = [-1, 0, 1, 1]
+kappa = 65.00526358589575
+box = [-0.1, 0, 0.1, 0.1]
 PeriodicX = True
 PeriodicY = False
 
@@ -313,8 +313,8 @@ Lx, Ly = [box[i+2] - box[i] for i in range(2)]
 
 Nx = 100
 Ny = 100
-x = np.linspace(-3, 3, Nx)
-y = np.linspace(0, 1, Ny)
+x = np.linspace(-0.3, 0.3, Nx)
+y = np.linspace(0, 0.1, Ny)
 X, Y = np.meshgrid(x, y)
 points = np.array([X.flatten(), Y.flatten()]).T
 tri = Delaunay(points)
@@ -350,11 +350,11 @@ for T in tri.simplices:
 ## Set the seed positions
 
 # Z = np.array([[1, 1], [1, 1.5], [0.5, 0.5], [1.5, 0.5]]) 
-Z = np.array([[0.5, 5]])
+# Z = np.array([[0.5, 5]])
 # N = len(Z)
 
 # NList = (np.rint(np.linspace(2, 250, 10)).astype(int)).tolist()  
-NList = [1] 
+NList = [50, 50, 50, 50, 50, 50, 50, 50] 
 Errors = []
 
 petsc_opts_1 = {
@@ -400,38 +400,35 @@ for N in NList:
     print("This test with ", N, " seeds is periodic ?", PeriodicX)
     # print(solver_options)
 
-    # # Generate x values between -1 and 1
-    # x = np.random.uniform(-1, 1, N)
+    # Generate x values between -1 and 1
+    x = np.random.uniform(-0.1, 0.1, N)
 
-    # # Generate y values between 98900 and 102000
-    # y = np.random.uniform(0.98900, 1.02000, N)
+    # Generate y values between 98900 and 102000
+    y = np.random.uniform(900, 1100, N)
 
-    # # Combine x and y into a single array of shape (N, 2)
-    # Z = np.column_stack((x, y))
+    # Combine x and y into a single array of shape (N, 2)
+    Z = np.column_stack((x, y))
 
     # Transform the seeds (diracs) eto the exponential chart
 
-    print("Initial seeds:", Z)
+    # print("Initial seeds:", Z)
 
     Y_initial = seed_transform(Z)
 
     ## Set an inital guess for the weights
 
-    psi_initial = rescale_weights(box, Y_initial, True) + 1 
-    # psi_initial = weight_transform(np.zeros(N) - 11/30, Z, f, c_p, Pi_0)
-    # psi0 = np.zeros(N)
+    # psi_initial = rescale_weights(box, Z, True) + c_p * Pi_0 
+    psi_initial = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
+    # psi_initial = np.zeros(N) + c_p * Pi_0
 
     Y, psi0 = create_periodic_dataset(Z, psi_initial, f, c_p, Pi_0, Lx, True)
-
-    print("Initial transformed seeds:", Y)
-    print("Initial transformed weights:", psi0)
 
     target_masses = np.zeros(len(psi0))
     target_masses[:N] = 1.0 / N 
 
     ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
 
-    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 10 ), petsc_options=solver_options, verbosity=0)
+    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 10 ), petsc_options=solver_options, verbosity=1)
 
     ## Set the error tolerance and the stopping criterion 
 
@@ -446,7 +443,7 @@ for N in NList:
 
     ## Check that the optimal transport problem is set up correctly, all cells should initially have positive mass
 
-    print( "Pre-masses: ", ot.pd.integrals() )
+    # print( "Pre-masses: ", ot.pd.integrals() )
     # mvs = ot.pd.der_integrals_wrt_weights()
     # m = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets))
     # NHess = -m.todense()
@@ -460,22 +457,22 @@ for N in NList:
     # print( "Numerical Hessian : \n", NHess)
 
     # 6. SOLVE THE OPTIMAL TRANSPORT PROBLEM
-    ot.adjust_weights_periodic(Z, f, c_p, Pi_0, Lx) # Pass in Z_initial and other params
+    ot.adjust_weights_bfgs_to_positive(Z, f, c_p, Pi_0, Lx) # Pass in Z_initial and other params
     psi_final_full = ot.get_weights()
 
     # 7. TRANSFORM FINAL WEIGHTS (Crucial)
     # Use only the weights from the REAL particles to transform back to 'w'.
     psi_final_real = psi_final_full[:N]
-    w = weight_transform_inv(psi_final_real, Z) # Use original Z, not Y
+    # w = weight_transform_inv(psi_final_real, Z) # Use original Z, not Y
 
     ## Check that the masses after solving the problem are all equal
 
     # print("Relative Error in the First Step Hessian", rel_error)
-    print("Final Mass: ", ot.pd.integrals()[:N])
-    print( "Error In Final Mass: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
-    print( "Internal Energy: ", ot.pd.internal_energy() )
-    print( "Centroids:", ot.pd.centroids() )
-    print( "Optimized weights: ", w )
+    # print("Final Mass: ", ot.pd.integrals()[:N])
+    # print( "Error In Final Mass: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
+    # print( "Internal Energy: ", ot.pd.internal_energy() )
+    # print( "Centroids:", ot.pd.centroids() )
+    # print( "Optimized weights: ", w )
 
 # plt.figure()                        # optional: starts a fresh figure
 # plt.plot(NList, Errors, marker='o') # line with dots at each point
@@ -587,4 +584,4 @@ plotter.camera_position = 'xy'
 # )
 
 # Render the frame
-plotter.show()
+# plotter.show()
