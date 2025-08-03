@@ -307,7 +307,7 @@ for T in tri.simplices:
 # N = len(Z)
 
 # NList = (np.rint(np.linspace(2, 250, 10)).astype(int)).tolist()  
-NList = [500] 
+NList = [100] 
 Errors = []
 
 petsc_opts_1 = {
@@ -381,7 +381,7 @@ for N in NList:
 
     ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
 
-    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 10 ), petsc_options=solver_options, verbosity=0)
+    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 9 ), petsc_options=solver_options, verbosity=0)
 
     ## Set the error tolerance and the stopping criterion 
 

@@ -1,7 +1,7 @@
 
 #
 class CompressibleFunc:
-    def __init__(self, kappa = 1, gamma = 1.41, g = 1, f_cor = 1, pi_0 = 1, c_p = 1, Int = True, Int_res = 12):
+    def __init__(self, kappa = 1, gamma = 1.41, g = 1, f_cor = 1, pi_0 = 1, c_p = 1, Int = True, Int_res = 9):
         self.s = "compressible_func({:.16f} {:.16f} {:.16f} {:.16f} {:.16f} {:.16f} {:.16f} {:.16f})".format(kappa, gamma, g, f_cor, pi_0, c_p, Int, Int_res)
 
     def name(self):
