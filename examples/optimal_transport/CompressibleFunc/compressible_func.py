@@ -93,48 +93,20 @@ def expmap_inverse_vec(points, y, f, g):
     return np.stack((p1, p3), axis = 1)
 
 # This function now creates and returns the full periodic dataset.
-def create_periodic_dataset(Z_initial, psi_initial, f, c_p, Pi_0, Lx, PeriodicX):
-    """
-    Calculates and returns the full set of diracs, including periodic replicas,
-    to be treated as a single, larger non-periodic problem.
-    """
-    # If not periodic, just transform Z to Y and return the original data.
-    if not PeriodicX:
-        Y_initial = seed_transform(Z_initial)
-        return Y_initial, psi_initial
-
-    # --- Start with the original data ---
-    # The OT object needs positions in Y-space, so we transform the initial Z points.
-    Y_initial = seed_transform(Z_initial)
-    
-    # Create lists that we can append replica data to.
-    Y_extended = list(Y_initial)
-    psi_extended = list(psi_initial)
-
-    # --- Calculate and append replica data ---
-    w_base = weight_transform_inv(psi_initial, Z_initial, f, c_p, Pi_0)
-    num_original_seeds = Z_initial.shape[0]
-
-    for i in range(num_original_seeds):
+def create_periodic_dataset(Z, Lx):
+    Z_ext = list(Z)
+    for i in range(N):
         # Loop through periodic images (-1 for left, +1 for right)
         for n in [-1, 1]: 
-            T1 = Lx * n # Assuming Lx is the half-width of your domain
-            
+            T1 = Lx * n 
+                
             # 1. Calculate the true Z-replica position
-            z_rep = np.array([Z_initial[i, 0] + T1, Z_initial[i, 1]])
-            
-            # 2. Calculate the corresponding Y-replica position
-            y_rep = seed_transform(z_rep.reshape(1, -1))[0]
-            
-            # 3. Calculate the corresponding Y-replica weight from the base weight
-            psi_rep = weight_transform(w_base[i], z_rep.reshape(1, -1), f, c_p, Pi_0)[0]
-            
+            z_rep = np.array([Z[i, 0] + T1, Z[i, 1]])
+                
             # Append the new replica data to our lists
-            Y_extended.append(y_rep)
-            psi_extended.append(psi_rep)
-
-    # Convert lists back to NumPy arrays and return them.
-    return np.array(Y_extended), np.array(psi_extended)
+            Z_ext.append(z_rep)
+    
+    return np.array(Z_ext)
 
 def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, mea, res, PeriodicX, epsilon = 1e-4):
     N = len(w)
@@ -209,48 +181,36 @@ def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, mea, 
     return hessian_fd
 
 #Define the rescaling function to improve the inital guess for the Damped Newton Solver
-def rescale_weights(box, Z, PeriodicX):
+def rescale_weights(bx, Z, PeriodicX):
     """
-    Calculates initial weights for a 2D Laguerre tessellation by rescaling and
-    centering the generator points within the domain. This helps ensure a
-    good initial guess for the optimal transport solver.
-
-    This function handles edge cases, including single-particle systems or
-    collinear particles, without errors.
+    Rescales weights for 3D Laguerre tessellation, ensuring positive cell areas.
 
     Parameters:
-        box (list or tuple): Domain bounds in the format [xmin, ymin, xmax, ymax].
-        Z (numpy.ndarray): Seed points (shape: n x 2).
-        PeriodicX (bool): Flag indicating if the x-dimension is periodic.
+        bx (list/tuple): Domain [xmin, ymin, zmin, xmax, ymax, zmax].
+        Z (numpy.ndarray): Seed points (shape: n x 3).
+        psi (float): Initial guess for weights.
+        PeriodicX, PeriodicY (bool): Periodicity flags for each axis.
 
     Returns:
-        numpy.ndarray: A 1D array of calculated weights, one for each seed point.
+        tuple: Weights (numpy.ndarray), scaling factor (float), and translation vector (numpy.ndarray).
     """
-    # For this 2D function, we assume the Y-dimension is not periodic.
     PeriodicY = False
-    
-    # Check for the trivial case of no points
-    if Z.shape[0] == 0:
-        return np.array([])
-        
+    if PeriodicX and PeriodicY:
+        return np.zeros(len(Z)), 0, 0
+
     min_Z, max_Z = np.min(Z, axis=0), np.max(Z, axis=0)
     lambda_vals = []
-    
-    # An array indicating which dimensions (x, y) are non-periodic
-    non_periodic_dims = ~np.array([PeriodicX, PeriodicY])
 
-    # Calculate the scaling factor lambda, considering only non-periodic dimensions
+    # Calculate lambda_ for each non-periodic dimension
     for i, periodic in enumerate([PeriodicX, PeriodicY]):
         if not periodic:
-            box_width = box[i + 2] - box[i]
+            box_width = bx[i + 2] - bx[i]
             point_spread = max_Z[i] - min_Z[i]
 
-            # --- FIX: Check for zero spread to prevent division by zero ---
             if point_spread > 1e-9:  # Use a small tolerance for floating point safety
                 lambda_dim = box_width / point_spread
                 lambda_vals.append(lambda_dim)
 
-    # --- FIX: Handle case where points have no spread in any non-periodic dimension ---
     if lambda_vals:
         # Choose the most constrained scaling factor and add a small buffer
         lambda_ = min(lambda_vals) * (1 - 1e-2)
@@ -259,27 +219,20 @@ def rescale_weights(box, Z, PeriodicX):
         # No scaling is necessary or meaningful.
         lambda_ = 1.0
 
-    # Calculate the translation vector t to center the rescaled points
-    translation = np.zeros(2)
+    # Calculate translation vector for non-periodic dimensions
+    translation = []
     for i, periodic in enumerate([PeriodicX, PeriodicY]):
         if not periodic:
-            center_of_box = (box[i + 2] + box[i]) / 2
-            center_of_points = (min_Z[i] + max_Z[i]) / 2
-            center_of_rescaled_points = lambda_ * center_of_points
-            translation[i] = center_of_box - center_of_rescaled_points
+            center_dom = (bx[i + 2] + bx[i]) / 2
+            center_rescaled = lambda_ * (min_Z[i] + max_Z[i]) / 2
+            translation.append(center_dom - center_rescaled)
+        else:
+            translation.append(0)
+    t = np.array(translation)[~np.array([PeriodicX, PeriodicY])]
 
-    # Filter the translation vector for only non-periodic dimensions
-    t = translation[non_periodic_dims]
-
-    # Select only the non-periodic coordinate data from Z
-    Z_mod = Z[:, non_periodic_dims]
-    
-    # If Z_mod is empty (all dimensions are periodic), return zero weights
-    if Z_mod.shape[1] == 0:
-        return np.zeros(Z.shape[0])
-
-    # Calculate the final weights
-    w = (1 - lambda_**2) * np.sum(np.square(Z_mod), axis=1) - 2 * lambda_ * np.dot(Z_mod, t)
+    # Calculate weights
+    Z_mod = Z[:, ~np.array([PeriodicX, PeriodicY])]
+    w = (1 - lambda_) * np.square(np.linalg.norm(Z_mod, axis=1)) - 2 * np.dot(Z_mod, t)
 
     return w
 
@@ -289,7 +242,7 @@ f = 1
 g = 1 #10
 c_p = 1003.5
 Pi_0 = 0.864
-gamma = 2
+gamma = 1.41
 kappa = 65.00526358589575
 box = [-0.1, 0, 0.1, 0.1]
 PeriodicX = True
@@ -311,8 +264,8 @@ Lx, Ly = [box[i+2] - box[i] for i in range(2)]
 
 # # If working on a distorted domain do the following
 
-Nx = 100
-Ny = 100
+Nx = 25
+Ny = 25
 x = np.linspace(-0.3, 0.3, Nx)
 y = np.linspace(0, 0.1, Ny)
 X, Y = np.meshgrid(x, y)
@@ -354,7 +307,7 @@ for T in tri.simplices:
 # N = len(Z)
 
 # NList = (np.rint(np.linspace(2, 250, 10)).astype(int)).tolist()  
-NList = [50, 50, 50, 50, 50, 50, 50, 50] 
+NList = [500] 
 Errors = []
 
 petsc_opts_1 = {
@@ -413,26 +366,26 @@ for N in NList:
 
     # print("Initial seeds:", Z)
 
-    Y_initial = seed_transform(Z)
+    Z_ext = create_periodic_dataset(Z, Lx)
+    Y = seed_transform(Z_ext)
 
     ## Set an inital guess for the weights
 
-    # psi_initial = rescale_weights(box, Z, True) + c_p * Pi_0 
-    psi_initial = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
-    # psi_initial = np.zeros(N) + c_p * Pi_0
+    psi0 = rescale_weights([-0.3, 0.045, 0.3, 0.1], Y, False) + 7.01 * kappa
 
-    Y, psi0 = create_periodic_dataset(Z, psi_initial, f, c_p, Pi_0, Lx, True)
+    # psi_initial = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
+    # psi_initial = np.zeros(N) + c_p * Pi_0
 
     target_masses = np.zeros(len(psi0))
     target_masses[:N] = 1.0 / N 
 
     ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
 
-    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 10 ), petsc_options=solver_options, verbosity=1)
+    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 10 ), petsc_options=solver_options, verbosity=0)
 
     ## Set the error tolerance and the stopping criterion 
 
-    err_tol = (1e-3 / 100) * (1 / N)
+    err_tol = 1e-3 #(1e-3 / 100) * (1 / N)
     ot.set_stopping_criterion(err_tol, 'max delta masses')
 
     ## Adding replications based on periodicity
@@ -457,19 +410,19 @@ for N in NList:
     # print( "Numerical Hessian : \n", NHess)
 
     # 6. SOLVE THE OPTIMAL TRANSPORT PROBLEM
-    ot.adjust_weights_bfgs_to_positive(Z, f, c_p, Pi_0, Lx) # Pass in Z_initial and other params
+    ot.adjust_weights_periodic(Z, f, c_p, Pi_0, Lx) # Pass in Z_initial and other params
     psi_final_full = ot.get_weights()
 
     # 7. TRANSFORM FINAL WEIGHTS (Crucial)
     # Use only the weights from the REAL particles to transform back to 'w'.
     psi_final_real = psi_final_full[:N]
-    # w = weight_transform_inv(psi_final_real, Z) # Use original Z, not Y
+    w = weight_transform_inv(psi_final_real, Z) # Use original Z, not Y
 
     ## Check that the masses after solving the problem are all equal
 
     # print("Relative Error in the First Step Hessian", rel_error)
     # print("Final Mass: ", ot.pd.integrals()[:N])
-    # print( "Error In Final Mass: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
+    print( "Error In Final Mass: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
     # print( "Internal Energy: ", ot.pd.internal_energy() )
     # print( "Centroids:", ot.pd.centroids() )
     # print( "Optimized weights: ", w )
@@ -584,4 +537,4 @@ plotter.camera_position = 'xy'
 # )
 
 # Render the frame
-# plotter.show()
+plotter.show()

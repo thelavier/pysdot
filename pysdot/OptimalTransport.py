@@ -4,6 +4,9 @@ from .radial_funcs import RadialFuncInBall
 from .radial_funcs import RadialFuncUnit
 from .PowerDiagram import PowerDiagram
 import numpy as np
+import warnings
+from scipy.optimize import line_search
+from scipy.optimize.linesearch import LineSearchWarning
 from scipy.sparse import csr_matrix
 import importlib
 
@@ -518,62 +521,222 @@ class OptimalTransport:
         
         return False
     
-    def adjust_weights_bfgs_to_positive(self, Z_initial, f, c_p, Pi_0, Lx, relax=1.0):
+    def adjust_weights_bfgs_to_positive(self, Z_initial, f, c_p, Pi_0, Lx):
         """
-        A robust BFGS solver to find a state with all positive masses.
-
-        This version is correctly structured to handle a bad initial guess
-        by immediately using its line search to find a valid state.
+        A robust BFGS solver with a Wolfe line search to find a state 
+        with all positive masses.
         """
         num_real = Z_initial.shape[0]
         
-        # 1. Initialize with placeholder values. The real gradient will be
-        #    found by the first successful line search.
-        B_k = np.eye(num_real)
-        g_k = np.ones(num_real) # A generic, non-zero initial search direction
-        
-        for num_iter in range(self.max_iter):
-            old_weights = self.pd.weights.copy()
+        # 1. INITIALIZATION
+        w_k = self.pd.get_weights()[:num_real].copy()
+        B_k = np.eye(num_real) # Initial Hessian approximation
 
-            # 2. The main action is to always perform a line search to find a
-            #    valid next state. This is what allows it to recover from a bad start.
-            p_k = -B_k @ g_k
+        # Evaluate the initial state
+        mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
 
-            alpha = relax
-            while True:
-                dw_r = alpha * p_k
-                temp_psi = old_weights.copy()
-                temp_psi[:num_real] += dw_r
-                self.pd.set_weights(recalculate_replica_weights(Z_initial, temp_psi, f, c_p, Pi_0, Lx))
-                mvs_new = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-                if not mvs_new.error:
-                    break # Success! We found a valid geometric state.
+        # --- PHASE 1: FIND A VALID STATE ---
+        # If the initial guess is bad, we must first find a valid geometry
+        # before we can begin proper BFGS updates.
+        if mvs.error:
+            if self.verbosity > 0: print("Initial guess is bad. Starting search for a valid state...")
+            # Use a simple search to escape the void-cell region
+            search_dir = np.ones(num_real) # Simple, non-zero direction
+            alpha = 1.0
+            while alpha > 1e-9:
+                temp_w_real = w_k - alpha * search_dir # Move away from initial guess
+                
+                # Update weights and check validity
+                temp_full = self.pd.get_weights().copy(); temp_full[:num_real] = temp_w_real
+                psi_consistent = recalculate_replica_weights(Z_initial, temp_full, f, c_p, Pi_0, Lx)
+                self.pd.set_weights(psi_consistent)
+                mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+
+                if not mvs.error:
+                    if self.verbosity > 0: print("Found a valid state. Proceeding with BFGS.")
+                    break
                 alpha *= 0.5
-                if alpha < 1e-9:
-                    if self.verbosity > 0: print("BFGS line search failed to find any valid step.")
-                    return True
+            
+            if mvs.error:
+                if self.verbosity > 0: print("BFGS failed: Could not find any valid state from the initial guess.")
+                return True # Failed to find a valid state
 
-            # 3. We now have a valid state. Check if it meets the termination condition.
-            current_masses = mvs_new.v_values
-            if np.all(current_masses > 1e-12):
+        # Now we have a valid state, get the initial gradient
+        g_k = mvs.v_values[:num_real] - self.masses[:num_real]
+        w_k = self.pd.get_weights()[:num_real].copy()
+
+        # --- PHASE 2: BFGS OPTIMIZATION WITH WOLFE SEARCH ---
+        for num_iter in range(self.max_iter):
+            # Check for success before starting the iteration
+            if np.all(mvs.v_values > 1e-12):
                 if self.verbosity > 0:
-                    print(f"\nSuccess on iter {num_iter}: All cells (real and virtual) have positive mass. Terminating BFGS.")
+                    print(f"\nSuccess on iter {num_iter}: All cells have positive mass. Terminating BFGS.")
                 return False
 
-            # 4. If not terminated, update the BFGS state for the next search.
-            s_k = dw_r
-            g_k_plus_1 = current_masses[:num_real] - self.masses[:num_real]
+            # 2. GET SEARCH DIRECTION
+            try:
+                p_k = np.linalg.solve(B_k, -g_k)
+            except np.linalg.LinAlgError:
+                if self.verbosity > 0: print("Hessian approximation is singular. Resetting.")
+                B_k = np.eye(num_real)
+                p_k = -g_k
+
+            # 3. LINE SEARCH
+            alpha, g_k_plus_1, mvs_new, success = self._wolfe_line_search(
+                w_k, p_k, g_k, Z_initial, f, c_p, Pi_0, Lx
+            )
+            if not success:
+                return True # Line search failed, cannot continue
+
+            # 4. UPDATE STATE
+            s_k = alpha * p_k
+            w_k += s_k
             y_k = g_k_plus_1 - g_k
             
-            if abs(y_k.T @ s_k) > 1e-12:
-                rho_k = 1.0 / (y_k.T @ s_k)
-                I = np.eye(num_real)
-                term1 = I - rho_k * np.outer(s_k, y_k)
-                B_k = term1 @ B_k @ term1.T + rho_k * np.outer(s_k, s_k)
+            # 5. UPDATE HESSIAN APPROXIMATION
+            if abs(np.dot(y_k, s_k)) > 1e-12: # Check curvature condition
+                rho_k = 1.0 / np.dot(y_k, s_k)
+                # Standard Sherman-Morrison update for B_k
+                term1 = rho_k * np.outer(s_k, y_k)
+                B_k = (np.eye(num_real) - term1) @ B_k @ (np.eye(num_real) - term1.T) + rho_k * np.outer(s_k,s_k)
             
-            # Update the gradient for the next iteration's search
             g_k = g_k_plus_1
+            mvs = mvs_new
 
         if self.verbosity > 0:
             print(f"BFGS failed to achieve positive masses within {self.max_iter} iterations.")
         return True
+    
+    def adjust_weights_to_convergence_bfgs(self, Z_initial, f, c_p, Pi_0, Lx, tolerance=1e-3, max_iter=200):
+        """
+        Single‐pass “rescue + BFGS”:
+        1) Rescue: as long as any m_i==0, do mini‐GD steps on those faces.
+        2) Once all m_i>0, switch to full BFGS w/ backtracking‐Armijo on φ=½‖m*−m‖².
+        """
+        N      = Z_initial.shape[0]
+        total  = self.pd.positions.shape[0]
+        nrep   = (total//N - 1)//2
+        Jrep   = get_periodic_jacobian(N, nrep)
+
+        def set_w(w):
+            tmp      = self.pd.get_weights().copy()
+            tmp[:N]  = w
+            psi      = recalculate_replica_weights(Z_initial, tmp, f, c_p, Pi_0, Lx)
+            self.pd.set_weights(psi)
+
+        def masses():
+            return self.pd.integrals()[:N]
+
+        def build_Heff():
+            mvs   = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+            Hfull = -csr_matrix(
+                (mvs.m_values, mvs.m_columns, mvs.m_offsets),
+                shape=(total, total)
+            ).toarray()
+            return Hfull[:N,:N] + Hfull[:N,N:] @ Jrep
+
+        target = self.get_masses()[:N]
+        w_k    = self.pd.get_weights()[:N].copy()
+        B_k    = np.eye(N)
+
+        # 1) RESCUE subloop: fill any void cells via targeted GD
+        print("=== Rescue phase (fill zero‐mass cells) ===")
+        for rescue_it in range(20):
+            m_k = masses()
+            zeros = np.where(m_k <= 0)[0]
+            if len(zeros)==0:
+                print("All cells have positive mass — switching to BFGS.")
+                break
+
+            # gradient only on zero entries
+            g_k = target - m_k
+            p   = np.zeros_like(g_k)
+            p[zeros] = -g_k[zeros]        # push w_i down to expand those regions
+            if np.linalg.norm(p) < 1e-12:
+                p = -g_k                 # fallback to full GD
+            print(f" rescue_it={rescue_it}, zero_count={len(zeros)}, ‖p‖={np.linalg.norm(p):.3e}")
+
+            # simple backtracking to raise the minimum zero cell to >0
+            alpha = 1.0
+            for bt in range(20):
+                w_try = w_k + alpha*p
+                set_w(w_try)
+                m_try = masses()
+                if np.all(m_try>0):
+                    print(f"  → rescue success α={alpha:.2e}")
+                    w_k = w_try
+                    break
+                alpha *= 0.5
+            else:
+                print("  ! rescue FAILED to fill voids")
+                return False
+        else:
+            # if rescue loop never broke
+            print("  ✗ rescue phase gave up")
+            return False
+
+        # 2) BFGS subloop
+        print("=== BFGS phase (converge to tolerance) ===")
+        # rebuild initial grad & φ
+        m_k      = masses()
+        g_k      = target - m_k
+        φ_k      = 0.5 * g_k.dot(g_k)
+        J_k      = build_Heff()
+        gradφ_k  = J_k.T.dot(g_k)
+
+        backtrack_max = 30
+        for it in range(1, max_iter+1):
+            err     = np.linalg.norm(g_k)
+            if err < tolerance:
+                print(f"✓ converged in {it-1} iters; ‖mass_err‖={err:.3e}")
+                return True
+
+            # quasi‑Newton step
+            p_k = -B_k.dot(gradφ_k)
+            print(f"\niter {it:3d}: ‖g‖={err:.3e}, φ={φ_k:.3e}, ‖p‖={np.linalg.norm(p_k):.3e}")
+
+            # backtracking‐Armijo
+            alpha = 1.0
+            φ0    = φ_k
+            for bt in range(backtrack_max):
+                w_try = w_k + alpha*p_k
+                set_w(w_try)
+                m_try = masses()
+                φ_try = 0.5 * ((target-m_try)**2).sum()
+                print(f" bt{bt:2d}: α={alpha:.2e}, φ_try={φ_try:.3e}, min_mass={m_try.min():.3e}")
+                # require strict φ drop and no voids
+                if φ_try < φ0 and np.all(m_try>0):
+                    break
+                alpha *= 0.5
+            else:
+                print("  ! line‐search failed")
+                return False
+
+            # accept step
+            w_k      = w_try
+            m_k      = m_try
+            g_try    = target - m_k
+            J_try    = build_Heff()
+            gradφ_try= J_try.T.dot(g_try)
+
+            # BFGS update
+            s = w_k - (self.pd.get_weights()[:N] - alpha*p_k)  # or simply s=alpha*p_k
+            y = gradφ_try - gradφ_k
+            sy= s.dot(y)
+            print(f" s⋅y = {sy:.3e}")
+            if abs(sy)>1e-12:
+                rho = 1.0/sy
+                V   = np.eye(N) - rho*np.outer(s,y)
+                B_k = V.dot(B_k).dot(V.T) + rho*np.outer(s,s)
+                print("  → updated B_k")
+            else:
+                B_k[:] = np.eye(N)
+                print("  → reset B_k")
+
+            # update for next iter
+            g_k     = g_try
+            gradφ_k = gradφ_try
+            φ_k     = φ_try
+
+        print("✗ failed to converge within max_iter")
+        return False
