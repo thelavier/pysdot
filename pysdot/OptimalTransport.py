@@ -4,9 +4,7 @@ from .radial_funcs import RadialFuncInBall
 from .radial_funcs import RadialFuncUnit
 from .PowerDiagram import PowerDiagram
 import numpy as np
-import warnings
-from scipy.optimize import line_search
-from scipy.optimize.linesearch import LineSearchWarning
+import time
 from scipy.sparse import csr_matrix
 import importlib
 
@@ -22,12 +20,12 @@ def set_petsc_options(options_dict):
         if value is not None:
             sys.argv.append(str(value))
 
-def weight_transform(w, Z, f=1.0, c_p=1.0, Pi_0=1.0):
+def weight_transform(w, Z, f=1.0):
         """
         Given w (an (N,) array) and Z (an (N,2) array, each row [z1, z2]),
         compute for each i:
         
-            psi^i = w^i + (z1^i/(2*z2^i))^2 + (1/(2*z2^i))^2 - (f^2/(2*z2^i))*(z1^i)^2 + c_p * Pi_0
+            psi^i = w^i + (z1^i/(2*z2^i))^2 + (1/(2*z2^i))^2 - (f^2/(2*z2^i))*(z1^i)^2 
         
         Returns an array of the same shape as w.
         The parameters f, c_p, and Pi_0 can be adjusted or passed in.
@@ -40,15 +38,15 @@ def weight_transform(w, Z, f=1.0, c_p=1.0, Pi_0=1.0):
         term2 = (1 / (2 * z2))**2
         term3 = (f**2 / (2 * z2)) * (z1**2)
         
-        psi = w + term1 + term2 - term3 + c_p * Pi_0
+        psi = w + ( term1 + term2 - term3 )
         return psi
 
-def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
+def weight_transform_inv(psi, Z, f=1.0):
     """
     Given w (an (N,) array) and Z (an (N,2) array, each row [z1, z2]),
     compute for each i:
     
-        w^i = psi^i - (z1^i/(2*z2^i))^2 - (1/(2*z2^i))^2 + (f^2/(2*z2^i))*(z1^i)^2 - c_p * Pi_0
+        w^i = psi^i - (z1^i/(2*z2^i))^2 - (1/(2*z2^i))^2 + (f^2/(2*z2^i))*(z1^i)^2
     
     Returns an array of the same shape as w.
     The parameters f, c_p, and Pi_0 can be adjusted or passed in.
@@ -61,29 +59,47 @@ def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
     term2 = (1 / (2 * z2))**2
     term3 = (f**2 / (2 * z2)) * (z1**2)
 
-    w = psi - term1 - term2 + term3 - c_p * Pi_0
+    w = psi - ( term1 + term2 - term3 )
 
     return w
 
-def recalculate_replica_weights(Z_initial, psi_extended, f, c_p, Pi_0, Lx):
+def create_extended_positions(Z_initial, Lx, num_replicas_per_side=1):
     """
-    Recalculates the psi weights of replicas based on the current psi weights of the real diracs.
+    Creates the full set of particle positions including periodic replicas.
+
+    The replica positions are ordered by their parent particle, consistent
+    with the structure required by get_periodic_jacobian.
+
+    Args:
+        Z_initial (np.array): An (N, 2) array of the real particle positions.
+        Lx (float): The periodic domain width in the x-direction.
+        num_replicas_per_side (int): The number of replicas to create on each side. Defaults to 1.
+
+    Returns:
+        np.array: The full (real + replica) positions array, Z_extended.
     """
     num_real = Z_initial.shape[0]
-    psi_real_current = psi_extended[:num_real]
-    w_real_current = weight_transform_inv(psi_real_current, Z_initial, f, c_p, Pi_0)
+    
+    # Create a list to hold the position arrays of the replicas
+    replica_list = []
 
-    replica_index_offset = num_real
+    # Loop through each real particle to create its corresponding replicas
     for i in range(num_real):
-        parent_w = w_real_current[i]
-        for n in [-1, 1]:
-            T1 = Lx * n
-            z_rep = np.array([Z_initial[i, 0] + T1, Z_initial[i, 1]])
-            psi_rep_new = weight_transform(parent_w, z_rep.reshape(1, -1), f, c_p, Pi_0)[0]
-            psi_extended[replica_index_offset] = psi_rep_new
-            replica_index_offset += 1
+        # Generate replicas for each side (e.g., -Lx, +Lx, then -2*Lx, +2*Lx, etc.)
+        for n in range(1, num_replicas_per_side + 1):
+            # Left replica
+            T_left = -Lx * n
+            replica_list.append(Z_initial[i] + [T_left, 0])
+            
+            # Right replica
+            T_right = Lx * n
+            replica_list.append(Z_initial[i] + [T_right, 0])
+    
+    # Vertically stack the initial positions and the new replica positions
+    Z_extended = np.array(np.vstack([Z_initial, np.array(replica_list)]))
+    
+    return Z_extended
 
-    return psi_extended
 
 def get_periodic_jacobian(num_real, num_replicas_per_side=1):
     """
@@ -335,72 +351,119 @@ class OptimalTransport:
         self._linear_solver_inst = module.Solver()
         return self._linear_solver_inst
 
-    def adjust_weights_periodic(self, Z_initial, f, c_p, Pi_0, Lx, ret_if_err=False, relax=1.0):
+    def adjust_weights_periodic(self, Z_initial, f, Lx, relax = 1.0):
         """
         Corrected Newton's method for the periodic case using robust
         block matrix algebra to compute the effective Hessian.
         """
-        assert(self.obj_max_dw or self.obj_max_dm)
+        linear_solver = self._get_linear_solver()
 
         num_real = Z_initial.shape[0]
         num_total = self.pd.positions.shape[0]
         num_replicas_per_side = (num_total // num_real - 1) // 2
+        num_replicas_per_particle = (num_total // num_real) - 1
+
+        if self.verbosity > 0:
+            print("--- Starting Periodic Newton Solver ---")
+            print(f"Num real particles: {num_real}, Total particles: {num_total}")
 
         # Get the Jacobian that defines the dependency between weights
         Jacobian = get_periodic_jacobian(num_real, num_replicas_per_side)
-
         old_weights = self.pd.weights.copy()
 
         for num_iter in range(self.max_iter):
+            iter_start_time = time.time()
+
             # 1. GET FULL DERIVATIVES
+            t0 = time.time()
             mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"\n[Iter {num_iter}]")
+                print(f"  (1) Get Derivatives: {t1 - t0:.4f}s")
+
             if mvs.error:
                 if num_iter == 0: raise Exception("BadInitialGuess: Void cells on first iteration.")
-                # Standard error handling
-                ratio = 0.5
+                if self.verbosity > 0:
+                    # Get cell integrals to count how many are empty.
+                    integrals = self.pd.integrals()
+                    # Check for mass < tolerance for floating point safety.
+                    num_void_cells = np.sum(integrals < 1e-12) 
+                    print(f"  Error: {num_void_cells} void cells detected. Halving step.")
+                ratio = 0.25
                 self.pd.set_weights((1 - ratio) * old_weights + ratio * self.pd.weights)
                 continue
             old_weights = self.pd.weights.copy()
 
             # 2. CONSTRUCT THE EFFECTIVE N x N SYSTEM ROBUSTLY
-            
-            # A. Create the full sparse Hessian H. The library computes -H.
-            #    This method is proven to work from your debugging code.
-            H_full_sparse = -csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
+            t0 = time.time()
+            H_full_sparse = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
             H_full = H_full_sparse.toarray()
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (2a) Hessian Assembly: {t1 - t0:.4f}s")
 
-            # B. Extract the required blocks using slicing
+            t0 = time.time()
             H_rr = H_full[:num_real, :num_real]
             H_rv = H_full[:num_real, num_real:]
-            
-            # C. Calculate the effective Hessian using the derived formula
             H_eff = H_rr + H_rv @ Jacobian
 
-            # D. Calculate the mass error vector for ONLY the real cells
-            #    mvs.v_values contains the current masses of all cells.
+            if self.verbosity > 0:
+                # The condition number is the key metric. A huge number (e.g., > 1e10) means it's ill-conditioned.
+                cond_num = np.linalg.cond(H_eff)
+                print(f"  Hessian Condition Number: {cond_num:.4e}")
+
+                # Also useful: check the spread of eigenvalues.
+                # A large ratio between max and min is another sign of ill-conditioning.
+                eigenvalues = np.linalg.eigvalsh(H_eff)
+                print(f"  Hessian Eigenvalues: min={np.min(eigenvalues):.4e}, max={np.max(eigenvalues):.4e}")
+
             F_r = mvs.v_values[:num_real] - self.masses[:num_real]
-            
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (2b) Effective Hessian Calc: {t1 - t0:.4f}s")
+
             # 3. SOLVE THE N x N SYSTEM: H_eff * dw_r = -F_r
+            t0 = time.time()
             try:
-                dw_r = np.linalg.solve(H_eff, -F_r)
+                H_eff_sparse = csr_matrix(H_eff)
+
+                A = linear_solver.create_matrix(
+                    num_real,
+                    H_eff_sparse.indptr,
+                    H_eff_sparse.indices,
+                    H_eff_sparse.data
+                )
+
+                b = linear_solver.create_vector(F_r)
+
+                dw_r = linear_solver.solve(A, b)
             except np.linalg.LinAlgError:
-                print("Error: Effective Hessian is singular. Cannot solve.")
-                print("H_eff:\n", H_eff)
-                print("F_r:", F_r)
+                print("Error: Regularized effective Hessian is singular. This is a severe issue.")
                 return True
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (3) Linear Solve: {t1 - t0:.4f}s")
 
             # 4. UPDATE ALL WEIGHTS
-            current_real_weights = self.pd.get_weights()[:num_real]
-            updated_real_weights = current_real_weights - relax * dw_r
+            t0 = time.time()
+
+            psi_r_old = self.pd.get_weights()[:num_real] #Retreve the old weights
+
+            w_r_old = weight_transform_inv(psi_r_old, Z_initial, f) #Turn the old psi into w
+            w_r_new = w_r_old - relax * dw_r #Update the w
             
-            temp_full_weights = self.pd.get_weights().copy()
-            temp_full_weights[:num_real] = updated_real_weights
-            
-            # This function correctly enforces the dependency rule after the update
-            psi_consistent = recalculate_replica_weights(
-                Z_initial, temp_full_weights, f, c_p, Pi_0, Lx
-            )
-            self.pd.set_weights(psi_consistent)
+            # Build the full w_extended vector by tiling the real weights and Z_extended using the translations
+            w_extended_new = np.hstack([w_r_new, np.repeat(w_r_new, num_replicas_per_particle)])
+            Z_extended = create_extended_positions(Z_initial, Lx)
+
+            psi_extended_new = weight_transform(w_extended_new, Z_extended, f) #Transform the new extended set of w into a new extended set of psi
+
+            self.pd.set_weights(psi_extended_new)
+
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (4) Update Weights: {t1 - t0:.4f}s")
 
             # 5. STOPPING CRITERIA (based on real quantities)
             nm = np.max(np.abs(F_r))
@@ -414,329 +477,287 @@ class OptimalTransport:
             if self.obj_max_dw and nw < self.obj_max_dw:
                 if self.verbosity > 0: print(f"Stopped on max_dw criterion: {nw}")
                 break
+
+            if self.verbosity > 0:
+                print(f"  Max Mass Error (nm): {nm:.4e}")
+                print(f"  Update Norm (nw):    {nw:.4e}")
+
+            iter_end_time = time.time()
+            if self.verbosity > 0:
+                print(f"  Total Iteration Time: {iter_end_time - iter_start_time:.4f}s")
                 
         return False
+    
+    def adjust_weights_transform_aware(self, Z_initial, f, initial_weights=None, ret_if_err=False, relax=1.0):
+        assert( self.obj_max_dw or self.obj_max_dm )
 
-    def adjust_weights_hybrid_periodic(self, Z_initial, f, c_p, Pi_0, Lx, relax=1.0, epsilon=1e-8):
+        if not ( initial_weights is None ):
+            self.set_weights( initial_weights )
+            
+        if self.pd.domain is None:
+            domain = ConvexPolyhedraAssembly()
+            if self.pd.positions.shape[ 1 ] == 2:
+                domain.add_box([0, 0], [1, 1])
+            else:
+                domain.add_box([0, 0, 0], [1, 1, 1])
+            self.pd.set_domain( domain )
+
+        if self.masses is None:
+            N = self.pd.positions.shape[0]
+            if isinstance(self.pd.radial_func, RadialFuncUnit):
+                self.masses = np.ones(N) * self.pd.domain.measure() / N
+            elif isinstance(self.pd.radial_func, RadialFuncInBall):
+                self.masses = np.ones(N) * 1e-6
+            elif isinstance(self.pd.radial_func, RadialFuncEntropy):
+                self.masses = np.ones(N) * self.pd.domain.measure() / N
+            else:
+                TODO
+
+        if self.pd.weights is None:
+            self.pd.weights = np.sqrt( self.masses )
+
+        linear_solver = self._get_linear_solver()
+        old_weights = self.pd.weights + 0.0
+        for num_iter in range(self.max_iter):
+            # derivatives
+            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+            if mvs.error:
+                if num_iter == 0:
+                    # print("initial guess for the weight lead to void cells, trying with 0 weights")
+                    # self.pd.set_weights( self.pd.weights * 0.0 )
+                    # mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+                    # if mvs.error:
+                    #     raise BadInitialGuess( self )
+                    raise BadInitialGuess( self )
+                else:
+                    ratio = 0.5
+                    self.pd.set_weights(
+                        (1 - ratio) * old_weights + ratio * self.pd.weights
+                    )
+                    if ret_if_err:
+                        return True
+                    if (self.verbosity > 1):
+                        print("bim (going back)")
+                    continue
+            old_weights = self.pd.weights
+
+            #
+            if self.pd.radial_func.need_rb_corr():
+                mvs.m_values[0] *= 2
+            mvs.v_values -= self.masses
+
+            # "dm" stopping criterion
+            nm = np.max(np.abs(mvs.v_values))
+            self.delta_m.append(nm)
+            if self.obj_max_dm:
+                if self.verbosity > 1:
+                    print("max dm:", nm)
+                if nm < self.obj_max_dm:
+                    break
+
+            # linear system
+            A = linear_solver.create_matrix(
+                self.pd.weights.shape[0],
+                mvs.m_offsets,
+                mvs.m_columns,
+                mvs.m_values
+            )
+
+            b = linear_solver.create_vector(
+                mvs.v_values
+            )
+
+            x = linear_solver.solve(A, b)
+
+            # update weights
+            psi_old = self.pd.get_weights() #Retreve the old weights
+            w_old = weight_transform_inv(psi_old, Z_initial, f) #Turn the old psi into w
+            loc_relax = relax
+            cpt_loc = 0
+            while True:
+                w_new = w_old - loc_relax * x
+                if self.pd.radial_func.ball_cut() == False or np.all( w_new >= 0 ): # HUM
+                    psi_new = weight_transform(w_new, Z_initial, f)
+                    self.pd.set_weights( psi_new )
+                    break
+                if self.verbosity > 1:
+                    print("negative weight, loc_relax=", loc_relax)
+                loc_relax *= 0.75
+
+                cpt_loc += 1
+                if cpt_loc == 50:
+                    print( "impossible to get positive weights" )
+                    return True
+
+            # "dw" stopping criterion
+            nw = np.max(np.abs(x))
+            self.delta_w.append(nw)
+            if self.obj_max_dw:
+                if self.verbosity > 1:
+                    print("max dw:", nw)
+                if nw < self.obj_max_dw:
+                    break
+                
+        return False
+    
+    def adjust_weights_hybrid(self, Z_initial, f, Lx, relax = 1.0):
         """
-        A robust hybrid optimization method. This version uses a corrected
-        loop structure and state management to ensure both BFGS and Newton
-        phases are functional.
+        Corrected Newton's method for the periodic case using robust
+        block matrix algebra to compute the effective Hessian.
         """
         assert(self.obj_max_dw or self.obj_max_dm)
+        linear_solver = self._get_linear_solver()
 
         num_real = Z_initial.shape[0]
         num_total = self.pd.positions.shape[0]
-        Jacobian = get_periodic_jacobian(num_real, (num_total // num_real - 1) // 2)
-
-        # --- CORRECTED INITIALIZATION BLOCK ---
-        mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-        if mvs.error:
-            if self.verbosity > 0: print("Info: Initial state has void cells. Starting BFGS with identity Hessian.")
-            B_k = np.eye(num_real)
-            g_k = np.ones(num_real)
-        else:
-            if self.verbosity > 0: print("Info: Initial state is valid. Starting BFGS with regularized Hessian.")
-            H_full_sparse = -csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
-            H_eff = H_full_sparse[:num_real, :num_real].toarray() + H_full_sparse[:num_real, num_real:].toarray() @ Jacobian
-            try:
-                B_k = np.linalg.inv(H_eff + epsilon * np.eye(num_real))
-            except np.linalg.LinAlgError:
-                B_k = np.eye(num_real)
-            g_k = mvs.v_values[:num_real] - self.masses[:num_real]
-        
-        old_weights = self.pd.weights.copy()
-        
-        for num_iter in range(self.max_iter):
-            # 1. GET DERIVATIVES AND USE RATIO RECOVERY IF A STEP FAILED
-            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-            if mvs.error:
-                if num_iter == 0: raise BadInitialGuess(self)
-                ratio = 0.5
-                self.pd.set_weights((1 - ratio) * old_weights + ratio * self.pd.weights)
-                if self.verbosity > 0: print(f"Info: Method -> {mode}. Iter {num_iter} -> void cells. Readjusting & retrying.")
-                continue
-
-            # 2. IF STEP WAS SUCCESSFUL, UPDATE CHECKPOINT AND DECIDE MODE
-            old_weights = self.pd.weights.copy()
-            current_masses = mvs.v_values
-            
-            if np.all(current_masses[:num_real] > 1e-12):
-                mode = 'Newton'
-            else:
-                mode = 'BFGS'
-                if num_iter == 0 and self.verbosity > 0:
-                    print("--- Initial state has zero-mass cells. Starting with BFGS. ---")
-            
-            # 3. PERFORM A STEP
-            if mode == 'Newton':
-                if num_iter > 0 and self.delta_m[-1] < 1e-9: break # Already converged
-                H_full_sparse = -csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
-                H_eff = H_full_sparse[:num_real, :num_real].toarray() + H_full_sparse[:num_real, num_real:].toarray() @ Jacobian
-                F_r = current_masses[:num_real] - self.masses[:num_real]
-                try: dw_r = np.linalg.solve(H_eff, -F_r)
-                except np.linalg.LinAlgError: return True
-                
-                updated_real_weights = old_weights[:num_real] - relax * dw_r
-                temp_full_weights = old_weights.copy()
-                temp_full_weights[:num_real] = updated_real_weights
-                self.pd.set_weights(recalculate_replica_weights(Z_initial, temp_full_weights, f, c_p, Pi_0, Lx))
-                dw_r_final = relax * dw_r
-
-            else: # mode == 'BFGS'
-                g_k = current_masses[:num_real] - self.masses[:num_real]
-                if np.linalg.norm(g_k) < 1e-9: break
-                
-                p_k = -B_k @ g_k
-                alpha = relax
-                # Backtracking Line Search
-                while True:
-                    dw_r = alpha * p_k
-                    temp_psi = old_weights.copy()
-                    temp_psi[:num_real] += dw_r
-                    self.pd.set_weights(recalculate_replica_weights(Z_initial, temp_psi, f, c_p, Pi_0, Lx))
-                    mvs_new = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-                    if not mvs_new.error: break
-                    alpha *= 0.5
-                    if alpha < 1e-8: return True
-
-                # Update BFGS approximation
-                s_k = alpha * p_k
-                g_k_plus_1 = mvs_new.v_values[:num_real] - self.masses[:num_real]
-                y_k = g_k_plus_1 - g_k
-                if abs(y_k.T @ s_k) > 1e-12:
-                    rho_k = 1.0 / (y_k.T @ s_k)
-                    I = np.eye(num_real)
-                    term1 = I - rho_k * np.outer(s_k, y_k)
-                    B_k = term1 @ B_k @ term1.T + rho_k * np.outer(s_k, s_k)
-                dw_r_final = s_k
-            
-            # 4. STOPPING CRITERIA
-            nm = np.max(np.abs(self.pd.integrals()[:num_real] - self.masses[:num_real]))
-            self.delta_m.append(nm)
-            if self.obj_max_dm and nm < self.obj_max_dm: break
-            nw = np.max(np.abs(dw_r_final))
-            self.delta_w.append(nw)
-            if self.obj_max_dw and nw < self.obj_max_dw: break
-        
-        return False
-    
-    def adjust_weights_bfgs_to_positive(self, Z_initial, f, c_p, Pi_0, Lx):
-        """
-        A robust BFGS solver with a Wolfe line search to find a state 
-        with all positive masses.
-        """
-        num_real = Z_initial.shape[0]
-        
-        # 1. INITIALIZATION
-        w_k = self.pd.get_weights()[:num_real].copy()
-        B_k = np.eye(num_real) # Initial Hessian approximation
-
-        # Evaluate the initial state
-        mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-
-        # --- PHASE 1: FIND A VALID STATE ---
-        # If the initial guess is bad, we must first find a valid geometry
-        # before we can begin proper BFGS updates.
-        if mvs.error:
-            if self.verbosity > 0: print("Initial guess is bad. Starting search for a valid state...")
-            # Use a simple search to escape the void-cell region
-            search_dir = np.ones(num_real) # Simple, non-zero direction
-            alpha = 1.0
-            while alpha > 1e-9:
-                temp_w_real = w_k - alpha * search_dir # Move away from initial guess
-                
-                # Update weights and check validity
-                temp_full = self.pd.get_weights().copy(); temp_full[:num_real] = temp_w_real
-                psi_consistent = recalculate_replica_weights(Z_initial, temp_full, f, c_p, Pi_0, Lx)
-                self.pd.set_weights(psi_consistent)
-                mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-
-                if not mvs.error:
-                    if self.verbosity > 0: print("Found a valid state. Proceeding with BFGS.")
-                    break
-                alpha *= 0.5
-            
-            if mvs.error:
-                if self.verbosity > 0: print("BFGS failed: Could not find any valid state from the initial guess.")
-                return True # Failed to find a valid state
-
-        # Now we have a valid state, get the initial gradient
-        g_k = mvs.v_values[:num_real] - self.masses[:num_real]
-        w_k = self.pd.get_weights()[:num_real].copy()
-
-        # --- PHASE 2: BFGS OPTIMIZATION WITH WOLFE SEARCH ---
-        for num_iter in range(self.max_iter):
-            # Check for success before starting the iteration
-            if np.all(mvs.v_values > 1e-12):
-                if self.verbosity > 0:
-                    print(f"\nSuccess on iter {num_iter}: All cells have positive mass. Terminating BFGS.")
-                return False
-
-            # 2. GET SEARCH DIRECTION
-            try:
-                p_k = np.linalg.solve(B_k, -g_k)
-            except np.linalg.LinAlgError:
-                if self.verbosity > 0: print("Hessian approximation is singular. Resetting.")
-                B_k = np.eye(num_real)
-                p_k = -g_k
-
-            # 3. LINE SEARCH
-            alpha, g_k_plus_1, mvs_new, success = self._wolfe_line_search(
-                w_k, p_k, g_k, Z_initial, f, c_p, Pi_0, Lx
-            )
-            if not success:
-                return True # Line search failed, cannot continue
-
-            # 4. UPDATE STATE
-            s_k = alpha * p_k
-            w_k += s_k
-            y_k = g_k_plus_1 - g_k
-            
-            # 5. UPDATE HESSIAN APPROXIMATION
-            if abs(np.dot(y_k, s_k)) > 1e-12: # Check curvature condition
-                rho_k = 1.0 / np.dot(y_k, s_k)
-                # Standard Sherman-Morrison update for B_k
-                term1 = rho_k * np.outer(s_k, y_k)
-                B_k = (np.eye(num_real) - term1) @ B_k @ (np.eye(num_real) - term1.T) + rho_k * np.outer(s_k,s_k)
-            
-            g_k = g_k_plus_1
-            mvs = mvs_new
+        num_replicas_per_side = (num_total // num_real - 1) // 2
+        num_replicas_per_particle = (num_total // num_real) - 1
 
         if self.verbosity > 0:
-            print(f"BFGS failed to achieve positive masses within {self.max_iter} iterations.")
-        return True
-    
-    def adjust_weights_to_convergence_bfgs(self, Z_initial, f, c_p, Pi_0, Lx, tolerance=1e-3, max_iter=200):
-        """
-        Single‐pass “rescue + BFGS”:
-        1) Rescue: as long as any m_i==0, do mini‐GD steps on those faces.
-        2) Once all m_i>0, switch to full BFGS w/ backtracking‐Armijo on φ=½‖m*−m‖².
-        """
-        N      = Z_initial.shape[0]
-        total  = self.pd.positions.shape[0]
-        nrep   = (total//N - 1)//2
-        Jrep   = get_periodic_jacobian(N, nrep)
+            print("--- Starting Periodic Newton Solver ---")
+            print(f"Num real particles: {num_real}, Total particles: {num_total}")
 
-        def set_w(w):
-            tmp      = self.pd.get_weights().copy()
-            tmp[:N]  = w
-            psi      = recalculate_replica_weights(Z_initial, tmp, f, c_p, Pi_0, Lx)
-            self.pd.set_weights(psi)
+        # Get the Jacobian that defines the dependency between weights
+        Jacobian = get_periodic_jacobian(num_real, num_replicas_per_side)
+        old_weights = self.pd.weights.copy()
 
-        def masses():
-            return self.pd.integrals()[:N]
+        for num_iter in range(self.max_iter):
+            iter_start_time = time.time()
 
-        def build_Heff():
-            mvs   = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-            Hfull = -csr_matrix(
-                (mvs.m_values, mvs.m_columns, mvs.m_offsets),
-                shape=(total, total)
-            ).toarray()
-            return Hfull[:N,:N] + Hfull[:N,N:] @ Jrep
+            # 1. GET FULL DERIVATIVES
+            t0 = time.time()
+            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"\n[Iter {num_iter}]")
+                print(f"  (1) Get Derivatives: {t1 - t0:.4f}s")
 
-        target = self.get_masses()[:N]
-        w_k    = self.pd.get_weights()[:N].copy()
-        B_k    = np.eye(N)
+            if mvs.error:
+                if num_iter == 0: raise Exception("BadInitialGuess: Void cells on first iteration.")
+                if self.verbosity > 0:
+                    # Get cell integrals to count how many are empty.
+                    integrals = self.pd.integrals()
+                    # Check for mass < tolerance for floating point safety.
+                    num_void_cells = np.sum(integrals < 1e-12) 
+                    print(f"  Error: {num_void_cells} void cells detected. Halving step.")
+                ratio = 0.5
+                self.pd.set_weights((1 - ratio) * old_weights + ratio * self.pd.weights)
+                continue
+            old_weights = self.pd.weights.copy()
 
-        # 1) RESCUE subloop: fill any void cells via targeted GD
-        print("=== Rescue phase (fill zero‐mass cells) ===")
-        for rescue_it in range(20):
-            m_k = masses()
-            zeros = np.where(m_k <= 0)[0]
-            if len(zeros)==0:
-                print("All cells have positive mass — switching to BFGS.")
+            # 2. CONSTRUCT THE EFFECTIVE N x N SYSTEM ROBUSTLY
+            t0 = time.time()
+            H_full_sparse = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
+            H_full = H_full_sparse.toarray()
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (2a) Hessian Assembly: {t1 - t0:.4f}s")
+
+            t0 = time.time()
+            H_rr = H_full[:num_real, :num_real]
+            H_rv = H_full[:num_real, num_real:]
+            H_eff = H_rr + H_rv @ Jacobian - 1e-7 * np.identity(num_real)
+            H_eff_sparse = csr_matrix(H_eff)
+
+            if self.verbosity > 1:
+                cond_num = np.linalg.cond(H_full)
+                cond_num_eff = np.linalg.cond(H_eff)
+                print(f" Effective Hessian Condition Number: {cond_num_eff:.4e}")
+                print(f" Full Hessian Condition Number: {cond_num:.4e}")
+                eigenvalues_eff = np.linalg.eigvalsh(H_eff)
+                eigenvalues = np.linalg.eigvalsh(H_full)
+                print(f" Effective Hessian Eigenvalues: min={np.min(eigenvalues_eff):.4e}, max={np.max(eigenvalues_eff):.4e}")
+                print(f" Full Hessian Eigenvalues: min={np.min(eigenvalues):.4e}, max={np.max(eigenvalues):.4e}")
+
+            F_r = mvs.v_values[:num_real] - self.masses[:num_real]
+            F = mvs.v_values - self.masses
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (2b) Effective Hessian Calc: {t1 - t0:.4f}s")
+
+            # 3. SOLVE THE N x N SYSTEM: H_eff * dw_r = -F_r
+            t0 = time.time()
+            try:
+                A_eff = linear_solver.create_matrix( num_real, H_eff_sparse.indptr, H_eff_sparse.indices, H_eff_sparse.data )
+                b_eff = linear_solver.create_vector( F_r )
+                dw_r = linear_solver.solve( A_eff, b_eff ).getArray()
+            except Exception as e:
+                if self.verbosity > 0: print(f"  Warning: Periodic solve failed, using gradient. Error: {e}")
+                dw_r = F_r
+            try:
+                A = linear_solver.create_matrix( num_total, H_full_sparse.indptr, H_full_sparse.indices, H_full_sparse.data )
+                b = linear_solver.create_vector( F )
+                dw_np = linear_solver.solve( A, b ).getArray()
+            except Exception as e:
+                if self.verbosity > 0: print(f"  Warning: Non-periodic solve failed, using gradient. Error: {e}")
+                dw_np = F
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (3) Linear Solve: {t1 - t0:.4f}s")
+
+            # 4. UPDATE ALL WEIGHTS
+            t0 = time.time()
+
+            psi_old = self.pd.get_weights() #Retreve the old weights
+            Z_extended = create_extended_positions(Z_initial, Lx)
+            w_old = weight_transform_inv(psi_old, Z_extended, f) #Turn the old psi into w
+
+            # Start by trying the full periodic step (alpha = 1.0)
+            alpha = 1.0
+            while alpha > 1e-9:
+                # Blend the "safe" non-periodic step and the "fast" periodic step
+                dw_blend = (1 - alpha) * dw_np[:num_real] + alpha * dw_r
+
+                # Tentatively apply the blended update. The minus sign comes from your trusted non-periodic solver.
+                w_new = w_old[:num_real] - relax * dw_blend
+
+                w_extended_new = np.hstack([w_new, np.repeat(w_new, num_replicas_per_particle)])
+                psi_new = weight_transform(w_extended_new, Z_extended, f)
+
+                # Check if this new state is valid by attempting to get its derivatives
+                self.pd.set_weights(psi_new)
+                integrals = self.pd.integrals()
+                if np.all(integrals > 1e-12):
+                    # Success! This is a valid step.
+                    if self.verbosity > 0: print(f"Stepping with alpha: {alpha}")
+                    break
+                
+                # Failure. The step was too aggressive. Reduce alpha and try again.
+                alpha *= 0.5
+            
+            if alpha <= 1e-9:
+                if self.verbosity > 0: 
+                    print("  Warning: Line search failed. Taking a pure non-periodic step as a fallback.")
+
+                # Take a pure non-periodic step (alpha = 0)
+                w_new_safe = w_old - relax * dw_np
+                w_extended_fallback = np.hstack([w_new_safe[:num_real], np.repeat(w_new_safe[:num_real], num_replicas_per_particle)])
+                psi_new_safe = weight_transform(w_extended_fallback, Z_extended, f)
+                self.pd.set_weights(psi_new_safe)
+
+            t1 = time.time()
+            if self.verbosity > 0:
+                print(f"  (4) Update Weights: {t1 - t0:.4f}s")
+
+            # 5. STOPPING CRITERIA (based on real quantities)
+            nm = np.max(np.abs(F_r))
+            self.delta_m.append(nm)
+            if self.obj_max_dm and nm < self.obj_max_dm:
+                if self.verbosity > 0: print(f"Stopped on max_dm criterion: {nm}")
                 break
 
-            # gradient only on zero entries
-            g_k = target - m_k
-            p   = np.zeros_like(g_k)
-            p[zeros] = -g_k[zeros]        # push w_i down to expand those regions
-            if np.linalg.norm(p) < 1e-12:
-                p = -g_k                 # fallback to full GD
-            print(f" rescue_it={rescue_it}, zero_count={len(zeros)}, ‖p‖={np.linalg.norm(p):.3e}")
+            nw = np.max(np.abs(dw_r))
+            self.delta_w.append(nw)
+            if self.obj_max_dw and nw < self.obj_max_dw:
+                if self.verbosity > 0: print(f"Stopped on max_dw criterion: {nw}")
+                break
 
-            # simple backtracking to raise the minimum zero cell to >0
-            alpha = 1.0
-            for bt in range(20):
-                w_try = w_k + alpha*p
-                set_w(w_try)
-                m_try = masses()
-                if np.all(m_try>0):
-                    print(f"  → rescue success α={alpha:.2e}")
-                    w_k = w_try
-                    break
-                alpha *= 0.5
-            else:
-                print("  ! rescue FAILED to fill voids")
-                return False
-        else:
-            # if rescue loop never broke
-            print("  ✗ rescue phase gave up")
-            return False
+            if self.verbosity > 0:
+                print(f"  Max Mass Error (nm): {nm:.4e}")
+                print(f"  Update Norm (nw):    {nw:.4e}")
 
-        # 2) BFGS subloop
-        print("=== BFGS phase (converge to tolerance) ===")
-        # rebuild initial grad & φ
-        m_k      = masses()
-        g_k      = target - m_k
-        φ_k      = 0.5 * g_k.dot(g_k)
-        J_k      = build_Heff()
-        gradφ_k  = J_k.T.dot(g_k)
-
-        backtrack_max = 30
-        for it in range(1, max_iter+1):
-            err     = np.linalg.norm(g_k)
-            if err < tolerance:
-                print(f"✓ converged in {it-1} iters; ‖mass_err‖={err:.3e}")
-                return True
-
-            # quasi‑Newton step
-            p_k = -B_k.dot(gradφ_k)
-            print(f"\niter {it:3d}: ‖g‖={err:.3e}, φ={φ_k:.3e}, ‖p‖={np.linalg.norm(p_k):.3e}")
-
-            # backtracking‐Armijo
-            alpha = 1.0
-            φ0    = φ_k
-            for bt in range(backtrack_max):
-                w_try = w_k + alpha*p_k
-                set_w(w_try)
-                m_try = masses()
-                φ_try = 0.5 * ((target-m_try)**2).sum()
-                print(f" bt{bt:2d}: α={alpha:.2e}, φ_try={φ_try:.3e}, min_mass={m_try.min():.3e}")
-                # require strict φ drop and no voids
-                if φ_try < φ0 and np.all(m_try>0):
-                    break
-                alpha *= 0.5
-            else:
-                print("  ! line‐search failed")
-                return False
-
-            # accept step
-            w_k      = w_try
-            m_k      = m_try
-            g_try    = target - m_k
-            J_try    = build_Heff()
-            gradφ_try= J_try.T.dot(g_try)
-
-            # BFGS update
-            s = w_k - (self.pd.get_weights()[:N] - alpha*p_k)  # or simply s=alpha*p_k
-            y = gradφ_try - gradφ_k
-            sy= s.dot(y)
-            print(f" s⋅y = {sy:.3e}")
-            if abs(sy)>1e-12:
-                rho = 1.0/sy
-                V   = np.eye(N) - rho*np.outer(s,y)
-                B_k = V.dot(B_k).dot(V.T) + rho*np.outer(s,s)
-                print("  → updated B_k")
-            else:
-                B_k[:] = np.eye(N)
-                print("  → reset B_k")
-
-            # update for next iter
-            g_k     = g_try
-            gradφ_k = gradφ_try
-            φ_k     = φ_try
-
-        print("✗ failed to converge within max_iter")
+            iter_end_time = time.time()
+            if self.verbosity > 0:
+                print(f"  Total Iteration Time: {iter_end_time - iter_start_time:.4f}s")
+                
         return False

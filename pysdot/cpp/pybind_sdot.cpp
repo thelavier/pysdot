@@ -68,11 +68,11 @@ namespace {
         if ( func.size() > 19 && func.substr( 0, 18 ) == "compressible_func(" ) {
             std::istringstream is( func.substr( 18 ) );
             
-            PD_TYPE kappa, gamma, g, f_cor, pi_0, c_p, Int; 
+            PD_TYPE kappa, gamma, g, f_cor, pi_0, c_p,  w_offset, Int; 
             int     Int_res;
-            is >> kappa >> gamma >> g >> f_cor >> pi_0 >> c_p >> Int >> Int_res;
+            is >> kappa >> gamma >> g >> f_cor >> pi_0 >> c_p >> w_offset >> Int >> Int_res;
 
-            sdot::FunctionEnum::CompressibleFunc<PD_TYPE> f{ kappa, gamma, g, f_cor, pi_0, c_p, Int, Int_res };
+            sdot::FunctionEnum::CompressibleFunc<PD_TYPE> f{ kappa, gamma, g, f_cor, pi_0, c_p, w_offset, Int, Int_res };
             fu( f );
             return;
         }

@@ -14,6 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from itertools import combinations
 from collections import defaultdict
+import pandas as pd
 
 ## Various supporting functions to ensure that we transform to the c-exponential chart where the cost is quadratic
 
@@ -49,7 +50,7 @@ def weight_transform(w, Z, f=1.0, c_p=1.0, Pi_0=1.0):
     term2 = (1 / (2 * z2))**2
     term3 = (f**2 / (2 * z2)) * (z1**2)
     
-    psi = w + term1 + term2 - term3 + c_p * Pi_0
+    psi = w + term1 + term2 - term3
     return psi
 
 def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
@@ -70,7 +71,7 @@ def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
     term2 = (1 / (2 * z2))**2
     term3 = (f**2 / (2 * z2)) * (z1**2)
 
-    w = psi - term1 - term2 + term3 - c_p * Pi_0
+    w = psi - term1 - term2 + term3 #- c_p * Pi_0
     return w
 
 def expmap_inverse_vec(points, y, f, g):
@@ -105,10 +106,10 @@ def create_periodic_dataset(Z, Lx):
                 
             # Append the new replica data to our lists
             Z_ext.append(z_rep)
-    
+
     return np.array(Z_ext)
 
-def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, mea, res, PeriodicX, epsilon = 1e-4):
+def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, K_offset, mea = True, epsilon = 1e-9):
     N = len(w)
     hessian_fd = np.zeros((N, N))
 
@@ -123,21 +124,12 @@ def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, mea, 
                 w_perturbed_backward[i] -= epsilon
 
                 if mea == True:
-                    otf = OptimalTransport( positions = Y, weights = w_perturbed_forward, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = res ))
-                    otb = OptimalTransport( positions = Y, weights = w_perturbed_backward, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = res ))
+                    otf = OptimalTransport( positions = Y, weights = w_perturbed_forward, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ))
+                    otb = OptimalTransport( positions = Y, weights = w_perturbed_backward, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ))
 
-                    for x in range(-int(PeriodicX), int(PeriodicX) + 1):
-                        if x != 0 :
-                            otf.pd.add_replication([2 * x, 0])
-                            otb.pd.add_replication([2 * x, 0])
                 else:
                     otf = OptimalTransport( positions = Y, weights = w_perturbed_forward, masses = np.ones(N) / N, domain = domain)
                     otb = OptimalTransport( positions = Y, weights = w_perturbed_backward, masses = np.ones(N) / N, domain = domain)
-
-                    for x in range(-int(PeriodicX), int(PeriodicX) + 1):
-                        if x != 0 :
-                            otf.pd.add_replication([2 * x, 0])
-                            otb.pd.add_replication([2 * x, 0])
 
                 g_perturbed_forward = 1 / N - otf.pd.integrals()
                 g_perturbed_backward = 1 / N - otb.pd.integrals()
@@ -153,21 +145,12 @@ def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, mea, 
                 w_perturbed_backward_j[j] -= epsilon
 
                 if mea == True:
-                    otfj = OptimalTransport( positions = Y, weights = w_perturbed_forward_j, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = res ))
-                    otbj = OptimalTransport( positions = Y, weights = w_perturbed_backward_j, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = res ))
+                    otfj = OptimalTransport( positions = Y, weights = w_perturbed_forward_j, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ))
+                    otbj = OptimalTransport( positions = Y, weights = w_perturbed_backward_j, masses = np.ones(N) / N, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ))
                 
-                    for x in range(-int(PeriodicX), int(PeriodicX) + 1):
-                        if x != 0 :
-                            otfj.pd.add_replication([2 * x, 0])
-                            otbj.pd.add_replication([2 * x, 0])
                 else:
                     otfj = OptimalTransport( positions = Y, weights = w_perturbed_forward_j, masses = np.ones(N) / N, domain = domain)
                     otbj = OptimalTransport( positions = Y, weights = w_perturbed_backward_j, masses = np.ones(N) / N, domain = domain)
-
-                    for x in range(-int(PeriodicX), int(PeriodicX) + 1):
-                        if x != 0 :
-                            otfj.pd.add_replication([2 * x, 0])
-                            otbj.pd.add_replication([2 * x, 0])
 
                 # Compute g for both perturbed states in the j-th direction
                 g_forward = 1 / N - otfj.pd.integrals()
@@ -179,6 +162,55 @@ def finite_difference_hessian(Y, w, domain, kappa, gamma, g, f, Pi_0, c_p, mea, 
                 # Since Hessian is symmetric
                 hessian_fd[j, i] = hessian_fd[i, j]
     return hessian_fd
+
+def construct_naive_hessian(H_full, num_real, num_replicas_per_side=1):
+    """
+    Constructs the effective Hessian by manually folding the virtual blocks.
+    This serves as a check for the Jacobian-based method.
+    """
+    # 1. Extract the block matrices from the full Hessian
+    H_rr = H_full[:num_real, :num_real]
+    H_rv = H_full[:num_real, num_real:] # Real-Virtual interactions
+
+    # 2. Start the naive Hessian with the real-real block. This contains
+    # the main volume integral diagonal and the real-real boundary terms.
+    H_naive = H_rr.copy()
+
+    num_virtual_particles = H_rv.shape[1]
+    num_virtual_per_real = 2 * num_replicas_per_side
+
+    # 3. "Fold" the periodic interactions onto the naive Hessian
+    # Loop through each column of H_rv, which corresponds to a virtual particle.
+    for virtual_col_idx in range(num_virtual_particles):
+        # Determine which real particle this virtual particle belongs to.
+        # This is the correct mapping for our particle-wise ordering.
+        parent_real_idx = virtual_col_idx // num_virtual_per_real
+
+        # Add the interactions with this virtual particle (the column from H_rv)
+        # to the column of its parent real particle in our naive Hessian.
+        H_naive[:, parent_real_idx] += H_rv[:, virtual_col_idx]
+
+    return H_naive
+
+def get_periodic_jacobian(num_real, num_replicas_per_side=1):
+    """
+    Builds the Jacobian matrix J for the dependency dw_v = J * dw_r for
+    a 1D periodic system.
+    """
+    num_virtual_per_real = 2 * num_replicas_per_side
+    num_virtual = num_real * num_virtual_per_real
+    
+    J = np.zeros((num_virtual, num_real))
+    
+    # Each virtual particle's weight depends only on its corresponding
+    # real particle's weight, with a derivative of 1.
+    for i in range(num_real):
+        # Identify the rows corresponding to the i-th real particle's replicas
+        start_row = i * num_virtual_per_real
+        end_row = start_row + num_virtual_per_real
+        J[start_row:end_row, i] = 1.0
+            
+    return J
 
 #Define the rescaling function to improve the inital guess for the Damped Newton Solver
 def rescale_weights(bx, Z, PeriodicX):
@@ -244,7 +276,7 @@ c_p = 1003.5
 Pi_0 = 0.864
 gamma = 1.41
 kappa = 65.00526358589575
-box = [-0.1, 0, 0.1, 0.1]
+box = [-0.1, 0.0, 0.1, 0.1]
 PeriodicX = True
 PeriodicY = False
 
@@ -267,7 +299,7 @@ Lx, Ly = [box[i+2] - box[i] for i in range(2)]
 Nx = 25
 Ny = 25
 x = np.linspace(-0.3, 0.3, Nx)
-y = np.linspace(0, 0.1, Ny)
+y = np.linspace(0.0, 0.1, Ny)
 X, Y = np.meshgrid(x, y)
 points = np.array([X.flatten(), Y.flatten()]).T
 tri = Delaunay(points)
@@ -306,9 +338,9 @@ for T in tri.simplices:
 # Z = np.array([[0.5, 5]])
 # N = len(Z)
 
-# NList = (np.rint(np.linspace(2, 250, 10)).astype(int)).tolist()  
-NList = [100] 
-Errors = []
+NList = list(np.unique(np.logspace(0, 4, num=20, dtype=int)))
+NumberofTrials = 10
+TrialErrors = []
 
 petsc_opts_1 = {
     'ksp_type': 'gmres',      # Use Conjugate Gradient solver
@@ -349,90 +381,108 @@ petsc_opts_5 = {
 
 solver_options = petsc_opts_4
 
-for N in NList:
-    print("This test with ", N, " seeds is periodic ?", PeriodicX)
-    # print(solver_options)
+for M in range(0, NumberofTrials):
+    Errors = []
+    for N in NList:
+        print("This test with ", N, " seeds is periodic ?", PeriodicX)
+        # print(solver_options)
+        # np.random.seed(42)
 
-    # Generate x values between -1 and 1
-    x = np.random.uniform(-0.1, 0.1, N)
+        # Generate x values between -1 and 1
+        x = np.random.uniform(-0.1, 0.1, N)
 
-    # Generate y values between 98900 and 102000
-    y = np.random.uniform(900, 1100, N)
+        # Generate y values between 98900 and 102000
+        y = np.random.uniform(900, 1100, N)
 
-    # Combine x and y into a single array of shape (N, 2)
-    Z = np.column_stack((x, y))
+        # Combine x and y into a single array of shape (N, 2)
+        Z = np.column_stack((x, y))
 
-    # Transform the seeds (diracs) eto the exponential chart
+        # Transform the seeds (diracs) eto the exponential chart
 
-    # print("Initial seeds:", Z)
+        Z_ext = create_periodic_dataset(Z, Lx)
+        Y = seed_transform(Z_ext)
 
-    Z_ext = create_periodic_dataset(Z, Lx)
-    Y = seed_transform(Z_ext)
+        # print("Initial seeds:", Y)
 
-    ## Set an inital guess for the weights
+        ## Set an inital guess for the weights
 
-    psi0 = rescale_weights([-0.3, 0.045, 0.3, 0.1], Y, False) + 7.01 * kappa
+        psi0 = rescale_weights([-0.3, 0.045, 0.3, 0.1], Y, False)
+        K_offset = kappa * gamma * (1 / 0.02) ** (gamma - 1)
 
-    # psi_initial = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
-    # psi_initial = np.zeros(N) + c_p * Pi_0
+        # psi0 = rescale_weights([-1, 0, 1, 1], Y, False)
+        # K_offset = kappa * gamma * (1 / 2) ** (gamma - 1)
 
-    target_masses = np.zeros(len(psi0))
-    target_masses[:N] = 1.0 / N 
+        # psi_initial = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
+        # psi_initial = np.zeros(N) + c_p * Pi_0
 
-    ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
+        target_masses = np.ones(3 * N) / N #np.zeros(len(psi0))
+        # target_masses[:N] = 1.0 / N 
 
-    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, Int = True, Int_res = 9 ), petsc_options=solver_options, verbosity=0)
+        ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
 
-    ## Set the error tolerance and the stopping criterion 
+        ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ), petsc_options=solver_options, verbosity=1)
 
-    err_tol = 1e-3 #(1e-3 / 100) * (1 / N)
-    ot.set_stopping_criterion(err_tol, 'max delta masses')
+        ## Set the error tolerance and the stopping criterion 
 
-    ## Adding replications based on periodicity
+        err_tol = (1e-3 / 100) * (1 / N)
+        ot.set_stopping_criterion(err_tol, 'max delta masses')
 
-    # for x in range(-int(PeriodicX), int(PeriodicX) + 1):
-    #     if x != 0 :
-    #         ot.pd.add_replication([2 * x, 0])
+        # print("Offset Value: ", K_offset)
 
-    ## Check that the optimal transport problem is set up correctly, all cells should initially have positive mass
+        ## Adding replications based on periodicity
 
-    # print( "Pre-masses: ", ot.pd.integrals() )
-    # mvs = ot.pd.der_integrals_wrt_weights()
-    # m = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets))
-    # NHess = -m.todense()
-    # FDHess = finite_difference_hessian(Y, psi0, domain, kappa, gamma, g, f, Pi_0, c_p, mea = True, res = 100, PeriodicX=False)
-    # rel_error = np.linalg.norm(NHess - FDHess) / np.linalg.norm(FDHess) 
-    # print("Condition # of FD Hessian: ", np.linalg.cond(FDHess))
-    # print("Condition # of Numerical Hessian: ", np.linalg.cond(NHess))
-    # Errors.append(rel_error)
-    # print("Done", N)
-    # print( "Finite Differences Hessian : \n", FDHess)
-    # print( "Numerical Hessian : \n", NHess)
+        # for x in range(-int(PeriodicX), int(PeriodicX) + 1):
+        #     if x != 0 :
+        #         ot.pd.add_replication([2 * x, 0])
 
-    # 6. SOLVE THE OPTIMAL TRANSPORT PROBLEM
-    ot.adjust_weights_periodic(Z, f, c_p, Pi_0, Lx) # Pass in Z_initial and other params
-    psi_final_full = ot.get_weights()
+        ## Check that the optimal transport problem is set up correctly, all cells should initially have positive mass
 
-    # 7. TRANSFORM FINAL WEIGHTS (Crucial)
-    # Use only the weights from the REAL particles to transform back to 'w'.
-    psi_final_real = psi_final_full[:N]
-    w = weight_transform_inv(psi_final_real, Z) # Use original Z, not Y
+        # print( "Pre-masses: ", ot.pd.integrals() )
+        # num_real = Z.shape[0]
+        # num_total = ot.pd.positions.shape[0]
+        # num_replicas_per_side = (num_total // num_real - 1) // 2
+        # mvs = ot.pd.der_integrals_wrt_weights()
+        # m = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets))
+        # Jacobian = get_periodic_jacobian(num_real, num_replicas_per_side)
+        # H_full = -m.todense()
+        # H_rr = H_full[:num_real, :num_real]
+        # H_rv = H_full[:num_real, num_real:]
+        # H_eff = H_rr + H_rv @ Jacobian
+        # FDHess = finite_difference_hessian(Y, psi0, domain, kappa, gamma, g, f, Pi_0, c_p, K_offset=K_offset)
+        # FD_eff = construct_naive_hessian(H_full, num_real, num_replicas_per_side)
+        # rel_error = np.linalg.norm(H_full - FDHess) / np.linalg.norm(FDHess) 
+        # rel_error_2 = np.linalg.norm(H_eff - FD_eff) / np.linalg.norm(FD_eff) 
+        # print("Condition # of FD Hessian: ", np.linalg.cond(FDHess))
+        # print("Condition # of Numerical Hessian: ", np.linalg.cond(NHess))
+        # Errors.append(rel_error)
+        # print("Done", N)
+        # print( "Finite Differences Hessian : \n", FDHess)
+        # print( "Numerical Hessian : \n", NHess)
+        # print( "Hessian using Jacobian : \n", H_eff)
+        # print( "Hessian using Naive : \n", FD_eff)
 
-    ## Check that the masses after solving the problem are all equal
+        # 6. SOLVE THE OPTIMAL TRANSPORT PROBLEM
+        ot.adjust_weights_transform_aware(Z_ext, f)
+        # ot.adjust_weights_periodic(Z, f, Lx)
+        # ot.adjust_weights_hybrid(Z, f, Lx)
+        psi_final_full = ot.get_weights()
 
-    # print("Relative Error in the First Step Hessian", rel_error)
-    # print("Final Mass: ", ot.pd.integrals()[:N])
-    print( "Error In Final Mass: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
-    # print( "Internal Energy: ", ot.pd.internal_energy() )
-    # print( "Centroids:", ot.pd.centroids() )
-    # print( "Optimized weights: ", w )
+        # 7. TRANSFORM FINAL WEIGHTS 
+        w = weight_transform_inv(psi_final_full + K_offset - c_p * Pi_0, Z_ext) 
+        w_real = w[:N]
+        w_replicas = w[N:]
+        w_replicas_reshaped = w_replicas.reshape((N, 2))
 
-# plt.figure()                        # optional: starts a fresh figure
-# plt.plot(NList, Errors, marker='o') # line with dots at each point
-# plt.xlabel('N')                     # x-axis label
-# plt.ylabel('Error')                 # y-axis label
-# plt.tight_layout()                  # tidy up margins
-# plt.show()  
+        ## Check that the masses after solving the problem are all equal
+
+        # print("Relative Error in the 3Nx3N Hessian", rel_error)
+        # print("Relative Error in the NxN Hessian using the analytical Hessian and 2 different construction techniques", rel_error_2)
+        # print("Final Mass: ", ot.pd.integrals()[:N])
+        print( "Error In Final Mass of the Periodic Solver: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
+        # print( "Internal Energy: ", ot.pd.internal_energy() )
+        # print( "Centroids:", ot.pd.centroids() )
+        # print( "Optimized weights: ", w_real)
+    TrialErrors.append(Errors)
 
 ## Visualise the solution to the Optimal transport probelm
 
@@ -510,13 +560,22 @@ colours=ot.pd.integrals()
 # Read the data
 grid=pv.read(filename)
 
+# Get the ID (0, 1, ..., 3N-1) for each triangle in the mesh
+cell_ids = grid.cell_data['num'].astype(int)
+
+# Find the indices of the triangles that belong to the first N particles
+real_cell_indices = np.where(cell_ids < N)[0]
+
+# Create a new grid object containing only the cells for the real particles
+real_grid = grid.extract_cells(real_cell_indices)
+
 # create cell data that gives the cell volumes, this allows us to colour by cell volumes
-cell_colours = colours[grid.cell_data['num'].astype(int)]
-grid.cell_data['Mass']=cell_colours
+cell_colours = colours[real_grid.cell_data['num'].astype(int)]
+real_grid.cell_data['Mass']=cell_colours
 
 # plot the data with an automatically created plotter, for a static picture use backend='static'
 plotter = pv.Plotter(window_size=[800,800])
-plotter.add_mesh(grid) #, clim=[minvel, maxvel])
+plotter.add_mesh(real_grid) #, clim=[minvel, maxvel])
 plotter.set_scale(xscale = 1, yscale = 1)
 
 # Set the camera for 2D view
