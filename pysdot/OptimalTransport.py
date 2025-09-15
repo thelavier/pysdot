@@ -376,23 +376,27 @@ class OptimalTransport:
 
             # 1. GET FULL DERIVATIVES
             t0 = time.time()
-            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
+            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=False)
             t1 = time.time()
             if self.verbosity > 0:
                 print(f"\n[Iter {num_iter}]")
                 print(f"  (1) Get Derivatives: {t1 - t0:.4f}s")
+            # Get cell integrals to count how many are empty.
+            integrals = self.pd.integrals()[:num_real]
+            # Check for mass < tolerance for floating point safety.
+            num_void_real_cells = np.sum(integrals < 1e-12) 
 
-            if mvs.error:
-                if num_iter == 0: raise Exception("BadInitialGuess: Void cells on first iteration.")
+            if num_void_real_cells > 0:
+                if num_iter == 0:
+                    raise Exception("BadInitialGuess: Void cells detected in real particles on first iteration.")
+
                 if self.verbosity > 0:
-                    # Get cell integrals to count how many are empty.
-                    integrals = self.pd.integrals()
-                    # Check for mass < tolerance for floating point safety.
-                    num_void_cells = np.sum(integrals < 1e-12) 
-                    print(f"  Error: {num_void_cells} void cells detected. Halving step.")
-                ratio = 0.25
+                    print(f"  Error: {num_void_real_cells} real void cells detected. Halving step.")
+
+                # Fallback: reduce the step size and retry.
+                ratio = 0.5
                 self.pd.set_weights((1 - ratio) * old_weights + ratio * self.pd.weights)
-                continue
+                continue # This skips the rest of the loop and starts the next iteration.
             old_weights = self.pd.weights.copy()
 
             # 2. CONSTRUCT THE EFFECTIVE N x N SYSTEM ROBUSTLY
@@ -408,7 +412,7 @@ class OptimalTransport:
             H_rv = H_full[:num_real, num_real:]
             H_eff = H_rr + H_rv @ Jacobian
 
-            if self.verbosity > 0:
+            if self.verbosity > 1:
                 # The condition number is the key metric. A huge number (e.g., > 1e10) means it's ill-conditioned.
                 cond_num = np.linalg.cond(H_eff)
                 print(f"  Hessian Condition Number: {cond_num:.4e}")
@@ -597,167 +601,5 @@ class OptimalTransport:
                     print("max dw:", nw)
                 if nw < self.obj_max_dw:
                     break
-                
-        return False
-    
-    def adjust_weights_hybrid(self, Z_initial, f, Lx, relax = 1.0):
-        """
-        Corrected Newton's method for the periodic case using robust
-        block matrix algebra to compute the effective Hessian.
-        """
-        assert(self.obj_max_dw or self.obj_max_dm)
-        linear_solver = self._get_linear_solver()
-
-        num_real = Z_initial.shape[0]
-        num_total = self.pd.positions.shape[0]
-        num_replicas_per_side = (num_total // num_real - 1) // 2
-        num_replicas_per_particle = (num_total // num_real) - 1
-
-        if self.verbosity > 0:
-            print("--- Starting Periodic Newton Solver ---")
-            print(f"Num real particles: {num_real}, Total particles: {num_total}")
-
-        # Get the Jacobian that defines the dependency between weights
-        Jacobian = get_periodic_jacobian(num_real, num_replicas_per_side)
-        old_weights = self.pd.weights.copy()
-
-        for num_iter in range(self.max_iter):
-            iter_start_time = time.time()
-
-            # 1. GET FULL DERIVATIVES
-            t0 = time.time()
-            mvs = self.pd.der_integrals_wrt_weights(stop_if_void=True)
-            t1 = time.time()
-            if self.verbosity > 0:
-                print(f"\n[Iter {num_iter}]")
-                print(f"  (1) Get Derivatives: {t1 - t0:.4f}s")
-
-            if mvs.error:
-                if num_iter == 0: raise Exception("BadInitialGuess: Void cells on first iteration.")
-                if self.verbosity > 0:
-                    # Get cell integrals to count how many are empty.
-                    integrals = self.pd.integrals()
-                    # Check for mass < tolerance for floating point safety.
-                    num_void_cells = np.sum(integrals < 1e-12) 
-                    print(f"  Error: {num_void_cells} void cells detected. Halving step.")
-                ratio = 0.5
-                self.pd.set_weights((1 - ratio) * old_weights + ratio * self.pd.weights)
-                continue
-            old_weights = self.pd.weights.copy()
-
-            # 2. CONSTRUCT THE EFFECTIVE N x N SYSTEM ROBUSTLY
-            t0 = time.time()
-            H_full_sparse = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets), shape=(num_total, num_total))
-            H_full = H_full_sparse.toarray()
-            t1 = time.time()
-            if self.verbosity > 0:
-                print(f"  (2a) Hessian Assembly: {t1 - t0:.4f}s")
-
-            t0 = time.time()
-            H_rr = H_full[:num_real, :num_real]
-            H_rv = H_full[:num_real, num_real:]
-            H_eff = H_rr + H_rv @ Jacobian - 1e-7 * np.identity(num_real)
-            H_eff_sparse = csr_matrix(H_eff)
-
-            if self.verbosity > 1:
-                cond_num = np.linalg.cond(H_full)
-                cond_num_eff = np.linalg.cond(H_eff)
-                print(f" Effective Hessian Condition Number: {cond_num_eff:.4e}")
-                print(f" Full Hessian Condition Number: {cond_num:.4e}")
-                eigenvalues_eff = np.linalg.eigvalsh(H_eff)
-                eigenvalues = np.linalg.eigvalsh(H_full)
-                print(f" Effective Hessian Eigenvalues: min={np.min(eigenvalues_eff):.4e}, max={np.max(eigenvalues_eff):.4e}")
-                print(f" Full Hessian Eigenvalues: min={np.min(eigenvalues):.4e}, max={np.max(eigenvalues):.4e}")
-
-            F_r = mvs.v_values[:num_real] - self.masses[:num_real]
-            F = mvs.v_values - self.masses
-            t1 = time.time()
-            if self.verbosity > 0:
-                print(f"  (2b) Effective Hessian Calc: {t1 - t0:.4f}s")
-
-            # 3. SOLVE THE N x N SYSTEM: H_eff * dw_r = -F_r
-            t0 = time.time()
-            try:
-                A_eff = linear_solver.create_matrix( num_real, H_eff_sparse.indptr, H_eff_sparse.indices, H_eff_sparse.data )
-                b_eff = linear_solver.create_vector( F_r )
-                dw_r = linear_solver.solve( A_eff, b_eff ).getArray()
-            except Exception as e:
-                if self.verbosity > 0: print(f"  Warning: Periodic solve failed, using gradient. Error: {e}")
-                dw_r = F_r
-            try:
-                A = linear_solver.create_matrix( num_total, H_full_sparse.indptr, H_full_sparse.indices, H_full_sparse.data )
-                b = linear_solver.create_vector( F )
-                dw_np = linear_solver.solve( A, b ).getArray()
-            except Exception as e:
-                if self.verbosity > 0: print(f"  Warning: Non-periodic solve failed, using gradient. Error: {e}")
-                dw_np = F
-            t1 = time.time()
-            if self.verbosity > 0:
-                print(f"  (3) Linear Solve: {t1 - t0:.4f}s")
-
-            # 4. UPDATE ALL WEIGHTS
-            t0 = time.time()
-
-            psi_old = self.pd.get_weights() #Retreve the old weights
-            Z_extended = create_extended_positions(Z_initial, Lx)
-            w_old = weight_transform_inv(psi_old, Z_extended, f) #Turn the old psi into w
-
-            # Start by trying the full periodic step (alpha = 1.0)
-            alpha = 1.0
-            while alpha > 1e-9:
-                # Blend the "safe" non-periodic step and the "fast" periodic step
-                dw_blend = (1 - alpha) * dw_np[:num_real] + alpha * dw_r
-
-                # Tentatively apply the blended update. The minus sign comes from your trusted non-periodic solver.
-                w_new = w_old[:num_real] - relax * dw_blend
-
-                w_extended_new = np.hstack([w_new, np.repeat(w_new, num_replicas_per_particle)])
-                psi_new = weight_transform(w_extended_new, Z_extended, f)
-
-                # Check if this new state is valid by attempting to get its derivatives
-                self.pd.set_weights(psi_new)
-                integrals = self.pd.integrals()
-                if np.all(integrals > 1e-12):
-                    # Success! This is a valid step.
-                    if self.verbosity > 0: print(f"Stepping with alpha: {alpha}")
-                    break
-                
-                # Failure. The step was too aggressive. Reduce alpha and try again.
-                alpha *= 0.5
-            
-            if alpha <= 1e-9:
-                if self.verbosity > 0: 
-                    print("  Warning: Line search failed. Taking a pure non-periodic step as a fallback.")
-
-                # Take a pure non-periodic step (alpha = 0)
-                w_new_safe = w_old - relax * dw_np
-                w_extended_fallback = np.hstack([w_new_safe[:num_real], np.repeat(w_new_safe[:num_real], num_replicas_per_particle)])
-                psi_new_safe = weight_transform(w_extended_fallback, Z_extended, f)
-                self.pd.set_weights(psi_new_safe)
-
-            t1 = time.time()
-            if self.verbosity > 0:
-                print(f"  (4) Update Weights: {t1 - t0:.4f}s")
-
-            # 5. STOPPING CRITERIA (based on real quantities)
-            nm = np.max(np.abs(F_r))
-            self.delta_m.append(nm)
-            if self.obj_max_dm and nm < self.obj_max_dm:
-                if self.verbosity > 0: print(f"Stopped on max_dm criterion: {nm}")
-                break
-
-            nw = np.max(np.abs(dw_r))
-            self.delta_w.append(nw)
-            if self.obj_max_dw and nw < self.obj_max_dw:
-                if self.verbosity > 0: print(f"Stopped on max_dw criterion: {nw}")
-                break
-
-            if self.verbosity > 0:
-                print(f"  Max Mass Error (nm): {nm:.4e}")
-                print(f"  Update Norm (nw):    {nw:.4e}")
-
-            iter_end_time = time.time()
-            if self.verbosity > 0:
-                print(f"  Total Iteration Time: {iter_end_time - iter_start_time:.4f}s")
                 
         return False

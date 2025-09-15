@@ -32,7 +32,7 @@ def seed_transform(Z):
     y2 = -1 / (2 * z2)
     return np.column_stack((y1, y2))
 
-def weight_transform(w, Z, f=1.0, c_p=1.0, Pi_0=1.0):
+def weight_transform(w, Z, f=1.0):
     """
     Given w (an (N,) array) and Z (an (N,2) array, each row [z1, z2]),
     compute for each i:
@@ -53,7 +53,7 @@ def weight_transform(w, Z, f=1.0, c_p=1.0, Pi_0=1.0):
     psi = w + term1 + term2 - term3
     return psi
 
-def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
+def weight_transform_inv(psi, Z, f=1.0):
     """
     Given w (an (N,) array) and Z (an (N,2) array, each row [z1, z2]),
     compute for each i:
@@ -71,7 +71,7 @@ def weight_transform_inv(psi, Z, f=1.0, c_p=1.0, Pi_0=1.0):
     term2 = (1 / (2 * z2))**2
     term3 = (f**2 / (2 * z2)) * (z1**2)
 
-    w = psi - term1 - term2 + term3 #- c_p * Pi_0
+    w = psi - term1 - term2 + term3
     return w
 
 def expmap_inverse_vec(points, y, f, g):
@@ -296,8 +296,8 @@ Lx, Ly = [box[i+2] - box[i] for i in range(2)]
 
 # # If working on a distorted domain do the following
 
-Nx = 25
-Ny = 25
+Nx = 10
+Ny = 10
 x = np.linspace(-0.3, 0.3, Nx)
 y = np.linspace(0.0, 0.1, Ny)
 X, Y = np.meshgrid(x, y)
@@ -338,9 +338,7 @@ for T in tri.simplices:
 # Z = np.array([[0.5, 5]])
 # N = len(Z)
 
-NList = list(np.unique(np.logspace(0, 4, num=20, dtype=int)))
-NumberofTrials = 10
-TrialErrors = []
+NList = [2500]
 
 petsc_opts_1 = {
     'ksp_type': 'gmres',      # Use Conjugate Gradient solver
@@ -381,108 +379,96 @@ petsc_opts_5 = {
 
 solver_options = petsc_opts_4
 
-for M in range(0, NumberofTrials):
-    Errors = []
-    for N in NList:
-        print("This test with ", N, " seeds is periodic ?", PeriodicX)
-        # print(solver_options)
-        # np.random.seed(42)
+for N in NList:
+    print("This test with ", N, " seeds is periodic ?", PeriodicX)
+    # print(solver_options)
+    # np.random.seed(42)
 
-        # Generate x values between -1 and 1
-        x = np.random.uniform(-0.1, 0.1, N)
+    # Generate x values between -1 and 1
+    x = np.random.uniform(-0.1, 0.1, N)
 
-        # Generate y values between 98900 and 102000
-        y = np.random.uniform(900, 1100, N)
+    # Generate y values between 98900 and 102000
+    y = np.random.uniform(900, 1100, N)
 
-        # Combine x and y into a single array of shape (N, 2)
-        Z = np.column_stack((x, y))
+    # Combine x and y into a single array of shape (N, 2)
+    Z = np.column_stack((x, y))
 
-        # Transform the seeds (diracs) eto the exponential chart
+    # Transform the seeds (diracs) eto the exponential chart
 
-        Z_ext = create_periodic_dataset(Z, Lx)
-        Y = seed_transform(Z_ext)
+    Y_intr = seed_transform(Z)
+    psi_intr = rescale_weights([-0.1, 0.005, 0.1, 0.1], Y_intr, True)
+    w = weight_transform_inv(psi_intr, Z, f)
+    w_ext = np.hstack([w, np.repeat(w, 2)])
+    Z_ext = create_periodic_dataset(Z, Lx)
 
-        # print("Initial seeds:", Y)
+    ## Set an inital guess for the weights
 
-        ## Set an inital guess for the weights
+    Y = seed_transform(Z_ext)
+    psi0 = weight_transform(w_ext, Z_ext, f)
+    K_offset = kappa * gamma * (1 / 0.02) ** (gamma - 1)
 
-        psi0 = rescale_weights([-0.3, 0.045, 0.3, 0.1], Y, False)
-        K_offset = kappa * gamma * (1 / 0.02) ** (gamma - 1)
+    # psi0 = rescale_weights([-1, 0, 1, 1], Y, False)
+    # K_offset = kappa * gamma * (1 / 2) ** (gamma - 1)
 
-        # psi0 = rescale_weights([-1, 0, 1, 1], Y, False)
-        # K_offset = kappa * gamma * (1 / 2) ** (gamma - 1)
+    target_masses = np.ones(3 * N) / N 
 
-        # psi_initial = weight_transform(np.zeros(N), Z, f, c_p, Pi_0)
-        # psi_initial = np.zeros(N) + c_p * Pi_0
+    ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
 
-        target_masses = np.ones(3 * N) / N #np.zeros(len(psi0))
-        # target_masses[:N] = 1.0 / N 
+    ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ), petsc_options=solver_options, verbosity=1)
 
-        ## Initialise the optimal transport problem setting the resolution of the integration with Int_res which corresponds to the number of Gaussian Quadrature points 
+    ## Set the error tolerance and the stopping criterion 
 
-        ot = OptimalTransport( positions = Y, weights = psi0, masses = target_masses, domain = domain, radial_func = CompressibleFunc( kappa = kappa, gamma = gamma, g = g, f_cor = f, pi_0 = Pi_0, c_p = c_p, w_offset = K_offset, Int = True, Int_res = 9 ), petsc_options=solver_options, verbosity=1)
+    err_tol = (1e-3 / 100) * (1 / N)
+    ot.set_stopping_criterion(err_tol, 'max delta masses')
 
-        ## Set the error tolerance and the stopping criterion 
+    # print("Offset Value: ", K_offset)
 
-        err_tol = (1e-3 / 100) * (1 / N)
-        ot.set_stopping_criterion(err_tol, 'max delta masses')
+    ## Check that the optimal transport problem is set up correctly, all cells should initially have positive mass
 
-        # print("Offset Value: ", K_offset)
+    # print( "Pre-masses: ", ot.pd.integrals() )
+    # num_real = Z.shape[0]
+    # num_total = ot.pd.positions.shape[0]
+    # num_replicas_per_side = (num_total // num_real - 1) // 2
+    # mvs = ot.pd.der_integrals_wrt_weights()
+    # m = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets))
+    # Jacobian = get_periodic_jacobian(num_real, num_replicas_per_side)
+    # H_full = -m.todense()
+    # H_rr = H_full[:num_real, :num_real]
+    # H_rv = H_full[:num_real, num_real:]
+    # H_eff = H_rr + H_rv @ Jacobian
+    # FDHess = finite_difference_hessian(Y, psi0, domain, kappa, gamma, g, f, Pi_0, c_p, K_offset=K_offset)
+    # FD_eff = construct_naive_hessian(H_full, num_real, num_replicas_per_side)
+    # rel_error = np.linalg.norm(H_full - FDHess) / np.linalg.norm(FDHess) 
+    # rel_error_2 = np.linalg.norm(H_eff - FD_eff) / np.linalg.norm(FD_eff) 
+    # print("Condition # of FD Hessian: ", np.linalg.cond(FDHess))
+    # print("Condition # of Numerical Hessian: ", np.linalg.cond(NHess))
+    # print("Done", N)
+    # print( "Finite Differences Hessian : \n", FDHess)
+    # print( "Numerical Hessian : \n", NHess)
+    # print( "Hessian using Jacobian : \n", H_eff)
+    # print( "Hessian using Naive : \n", FD_eff)
 
-        ## Adding replications based on periodicity
+    # 6. SOLVE THE OPTIMAL TRANSPORT PROBLEM
+    # ot.adjust_weights_transform_aware(Z_ext, f)
+    ot.adjust_weights_periodic(Z, f, Lx)
+    # ot.adjust_weights_hybrid(Z, f, Lx)
+    psi_final_full = ot.get_weights()
 
-        # for x in range(-int(PeriodicX), int(PeriodicX) + 1):
-        #     if x != 0 :
-        #         ot.pd.add_replication([2 * x, 0])
+    # 7. TRANSFORM FINAL WEIGHTS 
+    # w = weight_transform_inv(psi_final_full + K_offset - c_p * Pi_0, Z_ext) 
+    # w_real = w[:N]
+    # w_replicas = w[N:]
+    # w_replicas_reshaped = w_replicas.reshape((N, 2))
 
-        ## Check that the optimal transport problem is set up correctly, all cells should initially have positive mass
+    ## Check that the masses after solving the problem are all equal
 
-        # print( "Pre-masses: ", ot.pd.integrals() )
-        # num_real = Z.shape[0]
-        # num_total = ot.pd.positions.shape[0]
-        # num_replicas_per_side = (num_total // num_real - 1) // 2
-        # mvs = ot.pd.der_integrals_wrt_weights()
-        # m = csr_matrix((mvs.m_values, mvs.m_columns, mvs.m_offsets))
-        # Jacobian = get_periodic_jacobian(num_real, num_replicas_per_side)
-        # H_full = -m.todense()
-        # H_rr = H_full[:num_real, :num_real]
-        # H_rv = H_full[:num_real, num_real:]
-        # H_eff = H_rr + H_rv @ Jacobian
-        # FDHess = finite_difference_hessian(Y, psi0, domain, kappa, gamma, g, f, Pi_0, c_p, K_offset=K_offset)
-        # FD_eff = construct_naive_hessian(H_full, num_real, num_replicas_per_side)
-        # rel_error = np.linalg.norm(H_full - FDHess) / np.linalg.norm(FDHess) 
-        # rel_error_2 = np.linalg.norm(H_eff - FD_eff) / np.linalg.norm(FD_eff) 
-        # print("Condition # of FD Hessian: ", np.linalg.cond(FDHess))
-        # print("Condition # of Numerical Hessian: ", np.linalg.cond(NHess))
-        # Errors.append(rel_error)
-        # print("Done", N)
-        # print( "Finite Differences Hessian : \n", FDHess)
-        # print( "Numerical Hessian : \n", NHess)
-        # print( "Hessian using Jacobian : \n", H_eff)
-        # print( "Hessian using Naive : \n", FD_eff)
-
-        # 6. SOLVE THE OPTIMAL TRANSPORT PROBLEM
-        ot.adjust_weights_transform_aware(Z_ext, f)
-        # ot.adjust_weights_periodic(Z, f, Lx)
-        # ot.adjust_weights_hybrid(Z, f, Lx)
-        psi_final_full = ot.get_weights()
-
-        # 7. TRANSFORM FINAL WEIGHTS 
-        w = weight_transform_inv(psi_final_full + K_offset - c_p * Pi_0, Z_ext) 
-        w_real = w[:N]
-        w_replicas = w[N:]
-        w_replicas_reshaped = w_replicas.reshape((N, 2))
-
-        ## Check that the masses after solving the problem are all equal
-
-        # print("Relative Error in the 3Nx3N Hessian", rel_error)
-        # print("Relative Error in the NxN Hessian using the analytical Hessian and 2 different construction techniques", rel_error_2)
-        # print("Final Mass: ", ot.pd.integrals()[:N])
-        print( "Error In Final Mass of the Periodic Solver: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
-        # print( "Internal Energy: ", ot.pd.internal_energy() )
-        # print( "Centroids:", ot.pd.centroids() )
-        # print( "Optimized weights: ", w_real)
-    TrialErrors.append(Errors)
+    # print("Relative Error in the 3Nx3N Hessian", rel_error)
+    # print("Relative Error in the NxN Hessian using the analytical Hessian and 2 different construction techniques", rel_error_2)
+    # print("Final Mass: ", ot.pd.integrals()[:N])
+    print( "Error In Final Mass of the Periodic Solver: ", np.linalg.norm(ot.get_masses()[:N] - ot.pd.integrals()[:N]) / np.linalg.norm(ot.get_masses()[:N]))
+    # print( "Internal Energy: ", ot.pd.internal_energy() )
+    # print( "Centroids:", ot.pd.centroids() )
+    # print( "Optimized weights: ", w_real)
 
 ## Visualise the solution to the Optimal transport probelm
 
